@@ -9,7 +9,7 @@ namespace EQCollector.Core;
 public sealed class ClientStrings
 {
     private static readonly Regex DbStr = new(@"^(\d+)\^(\d)\^([^^]+)\^(0|33)\^$", RegexOptions.Compiled);
-    private static readonly Regex SpellLine = new(@"^(\d+)\^([\w\s`'\-\(\):+]+?)\^", RegexOptions.Compiled);
+    private static readonly Regex SpellLine = new(@"^(\d+)\^([^^]+)\^", RegexOptions.Compiled);
 
     public Dictionary<int, string> Titles { get; } = new();
     public Dictionary<int, string> Descriptions { get; } = new();

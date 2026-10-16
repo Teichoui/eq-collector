@@ -222,6 +222,24 @@ public static class PcapReader
                     break;
                 }
 
+                case 0x00000002:                   // packet block (obsolete, but older pcapng writers still use it)
+                {
+                    if (total < 32) yield break;
+                    int id = U16();
+                    U16();                         // drops count
+                    uint high = U32();
+                    uint low = U32();
+                    uint captured = U32();
+                    U32();                         // original length
+                    ulong padded = ((ulong)captured + 3UL) & ~3UL;
+                    if (captured > MaxFrame || padded > total - 32UL) yield break;
+                    if (id >= interfaces.Count) break;
+                    var data = reader.ReadBytes((int)captured);
+                    var (linkType, tick) = interfaces[id];
+                    yield return new Frame(linkType, (((ulong)high << 32) | low) * tick, data);
+                    break;
+                }
+
                 case 0x00000003:                   // simple packet
                 {
                     if (total < 16 || interfaces.Count == 0) break;

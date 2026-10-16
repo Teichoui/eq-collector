@@ -208,8 +208,10 @@ public sealed class EQStreamReader
                     int session = (int)Be32(body);
                     var key = new[] { body[7], body[6], body[5], body[4] };   // the four key bytes, reversed
                     int maxLength = (int)Be32(body, 11);
-                    if (_clients.TryGetValue((dstIp, dstPort), out var pending) && pending.Session == session && pending.ServerIp == srcIp)
-                        AddClient(dstIp, dstPort, srcIp, maxLength, session, key, ts);
+                    // The response alone names both ends, the session id, the key and the packet size limit, so a capture
+                    // that starts after the client's request (or lost it) still decodes. Checksums reject anything that
+                    // only looked like a response.
+                    AddClient(dstIp, dstPort, srcIp, maxLength, session, key, ts);
                 }
                 break;
 
@@ -277,27 +279,63 @@ public sealed class EQStreamReader
         ushort start = seq;
         for (int guard = 0; guard < MaxFragments && f.Parts.ContainsKey(unchecked((ushort)(start - 1))); guard++) start = unchecked((ushort)(start - 1));
 
-        var run = new List<ushort>();
-        var data = new List<byte>();
+        // Only lengths are added up while walking the run; the bytes are copied once, when the run is complete (a payload
+        // in n fragments would otherwise cost n copies of everything so far).
+        var run = new List<(ushort Key, byte[] Part)>();
+        long total = 0;
         long size = -1;
         for (ushort key = start; f.Parts.TryGetValue(key, out var piece) && run.Count < MaxFragments; key = unchecked((ushort)(key + 1)))
         {
-            run.Add(key);
-            data.AddRange(piece.Part);
+            run.Add((key, piece.Part));
+            total += piece.Part.Length;
+
+            // Past the declared size: the fragments so far are a message whose end was lost, and this one starts the next.
+            // Drop the stale ones and carry on from this fragment.
+            if (size >= 0 && total > size + 4)
+            {
+                for (int i = 0; i < run.Count - 1; i++) Remove(f, run[i].Key);
+                run = new List<(ushort Key, byte[] Part)> { (key, piece.Part) };
+                total = piece.Part.Length;
+                size = -1;
+            }
+
             if (size < 0)
             {
-                if (data.Count < 4) continue;
-                size = Be32(data.GetRange(0, 4).ToArray());
+                if (total < 4) continue;
+                size = DeclaredSize(run);
                 if (size > MaxAppPacket) return null;                // not a first fragment (yet): the first may arrive later
             }
-            if (data.Count == size + 4)
+            if (total == size + 4)
             {
-                foreach (var k in run) Remove(f, k);
-                return data.GetRange(4, data.Count - 4).ToArray();
+                var payload = new byte[size];
+                int skip = 4;                                        // the length prefix is not part of the payload
+                int written = 0;
+                foreach (var (_, bytes) in run)
+                {
+                    int from = Math.Min(skip, bytes.Length);
+                    skip -= from;
+                    Buffer.BlockCopy(bytes, from, payload, written, bytes.Length - from);
+                    written += bytes.Length - from;
+                }
+                foreach (var (k, _) in run) Remove(f, k);
+                return payload;
             }
-            if (data.Count > size + 4) return null;                  // more than this run declares: not a real payload
+            if (total > size + 4) return null;                       // more than this run declares: not a real payload
         }
         return null;                                                 // incomplete: wait for more (old fragments time out)
+    }
+
+    /// <summary>The big-endian length in the first four bytes of a run of fragments (they may span the first two).</summary>
+    private static long DeclaredSize(List<(ushort Key, byte[] Part)> run)
+    {
+        uint size = 0;
+        int taken = 0;
+        foreach (var (_, bytes) in run)
+        {
+            for (int i = 0; i < bytes.Length && taken < 4; i++, taken++) size = (size << 8) | bytes[i];
+            if (taken == 4) break;
+        }
+        return size;
     }
 
     private static void Remove(Fragments f, ushort key)

@@ -223,6 +223,136 @@ public class RobustnessTests
     }
 
     [Fact]
+    public void Every_item_column_has_its_own_name()
+    {
+        // a repeated name would make the second value silently vanish from items.jsonl
+        Assert.Equal(ItemDecoder.Columns.Length, ItemDecoder.Columns.Distinct().Count());
+    }
+
+    [Fact]
+    public void Skipping_an_enormous_count_is_a_parse_error_not_an_overflow()
+    {
+        var cursor = new ByteCursor(new byte[10], 5);
+        Assert.Throws<ParseException>(() => cursor.Skip(int.MaxValue));
+    }
+
+    [Fact]
+    public void A_payload_in_a_thousand_fragments_is_joined_quickly()
+    {
+        var got = new List<AppPacket>();
+        var reader = new EQStreamReader(got.Add);
+        Connect(reader, 0xC0A80105, 50000);
+
+        var big = new byte[1000 * 400 - 6];
+        new Random(1).NextBytes(big);
+        var app = App(0x77d4, big);                                  // 2-byte opcode + data
+        var whole = Concat(Be32((uint)app.Length), app);             // 4-byte length prefix: exactly 1000 pieces of 400
+        Assert.Equal(1000 * 400, whole.Length);
+
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < 1000; i++)
+        {
+            var part = whole.Skip(i * 400).Take(400).ToArray();
+            reader.Feed(Server, 0xC0A80105, ServerPort, 50000, WithCrc(0x0D, Concat(new byte[] { 0xA5 }, Be16(i), part)), 3);
+        }
+
+        Assert.Equal(big, Assert.Single(got).Data);
+        Assert.True(timer.Elapsed < TimeSpan.FromSeconds(5), $"took {timer.Elapsed}");
+    }
+
+    private static void SendFragments(EQStreamReader reader, byte[] app, int firstSeq, int chunk, int skipIndex = -1, double time = 3)
+    {
+        var whole = Concat(Be32((uint)app.Length), app);
+        int index = 0;
+        for (int offset = 0; offset < whole.Length; offset += chunk, index++)
+        {
+            if (index == skipIndex) continue;                                  // this fragment is "lost"
+            var part = whole.Skip(offset).Take(chunk).ToArray();
+            reader.Feed(Server, 0xC0A80105, ServerPort, 50000, WithCrc(0x0D, Concat(new byte[] { 0xA5 }, Be16((firstSeq + index) & 0xFFFF), part)), time);
+        }
+    }
+
+    [Fact]
+    public void A_lost_last_fragment_does_not_stop_the_next_message()
+    {
+        var got = new List<AppPacket>();
+        var reader = new EQStreamReader(got.Add);
+        Connect(reader, 0xC0A80105, 50000);
+
+        var a = App(0x1111, Enumerable.Range(0, 1000).Select(i => (byte)(i % 200)).ToArray());   // 3 fragments: seq 10, 11, 12
+        var b = App(0x2222, Enumerable.Range(0, 700).Select(i => (byte)(i % 190)).ToArray());     // 2 fragments: seq 13, 14
+        SendFragments(reader, a, firstSeq: 10, chunk: 400, skipIndex: 2);       // the end of A never arrives
+        SendFragments(reader, b, firstSeq: 13, chunk: 400);
+
+        var p = Assert.Single(got);
+        Assert.Equal(0x2222, p.Opcode);
+        Assert.Equal(700, p.Data.Length);
+    }
+
+    [Fact]
+    public void A_session_is_learned_from_its_response_when_the_request_was_not_captured()
+    {
+        var got = new List<AppPacket>();
+        var reader = new EQStreamReader(got.Add);
+        // no request: only the response, then data
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, Concat(Be16(2), Be32(0x01020304), WireKey, new byte[3], Be32(512), new byte[4]), 2);
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, StoredData(1, App(0x1111, new byte[30])), 3);
+        Assert.Equal(0x1111, Assert.Single(got).Opcode);
+    }
+
+    [Fact]
+    public void Spell_names_with_punctuation_are_read()
+    {
+        var path = TempFile(System.Text.Encoding.UTF8.GetBytes("100^Complete Heal^0^1\n101^Spirit of Wolf Rk. II^0^2\n102^Ro's Fiery Sundering, Rk. III!^0^3\n"));
+        try
+        {
+            var s = new ClientStrings();
+            s.LoadSpells(path);
+            Assert.Equal("Spirit of Wolf Rk. II", s.Spells[101]);
+            Assert.Equal("Ro's Fiery Sundering, Rk. III!", s.Spells[102]);
+            Assert.Equal(3, s.Spells.Count);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void An_existing_items_file_with_odd_lines_does_not_stop_the_collector_starting()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "items.jsonl"), "null\n[1,2]\n\"text\"\n42\n{ not json\n{\"id\": 5}\n\n");
+        try
+        {
+            using var engine = new CollectorEngine(dir);          // must not throw
+            Assert.Equal(0, engine.ItemCount);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void A_legacy_pcapng_packet_block_is_read()
+    {
+        var frame = UdpFrame(20 + 8 + 10, 10);
+        int padded = (frame.Length + 3) & ~3;
+        uint blockLength = (uint)(32 + padded);
+        var shb = Concat(new byte[] { 0x0A, 0x0D, 0x0D, 0x0A }, BitConverter.GetBytes(28u), BitConverter.GetBytes(0x1A2B3C4Du),
+            BitConverter.GetBytes((ushort)1), BitConverter.GetBytes((ushort)0), BitConverter.GetBytes(-1L), BitConverter.GetBytes(28u));
+        var idb = Concat(BitConverter.GetBytes(1u), BitConverter.GetBytes(20u), BitConverter.GetBytes((ushort)1), BitConverter.GetBytes((ushort)0),
+            BitConverter.GetBytes(65535u), BitConverter.GetBytes(20u));
+        var pb = Concat(BitConverter.GetBytes(2u), BitConverter.GetBytes(blockLength), BitConverter.GetBytes((ushort)0), BitConverter.GetBytes((ushort)0),
+            BitConverter.GetBytes(0u), BitConverter.GetBytes(0u), BitConverter.GetBytes((uint)frame.Length), BitConverter.GetBytes((uint)frame.Length),
+            frame, new byte[padded - frame.Length], BitConverter.GetBytes(blockLength));
+        var path = TempFile(Concat(shb, idb, pb));
+        try
+        {
+            var frames = PcapReader.ReadFrames(path).ToList();
+            Assert.Single(frames);
+            Assert.Equal(frame, frames[0].Data);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void The_AA_finder_keeps_the_slot_width_it_is_told()
     {
         Assert.False(new AaFinder(0x30cf, bit64: false).Bit64);

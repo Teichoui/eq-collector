@@ -237,6 +237,11 @@ public sealed class MainForm : Form
             Log("Could not start capture: " + ex.Message);
             _capture?.Dispose();
             _capture = null;
+            lock (_engineLock)
+            {
+                _engine?.Close();            // an engine that never ran must not stay selected ("Save AAs now" would use it)
+                _engine = null;
+            }
         }
         UpdateModeEnabled();
     }
@@ -253,6 +258,7 @@ public sealed class MainForm : Form
         var strings = LoadStrings();
         var outDir = _out.Text.Trim();
         _cancel = new CancellationTokenSource();
+        lock (_engineLock) _engine = null;          // so the statistics line shows this run, not an earlier session's engine
         _fileRunning = true;
         Volatile.Write(ref _fileProgress, 0);
         _state.Text = "Reading the capture...";

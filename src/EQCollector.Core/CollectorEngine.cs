@@ -71,7 +71,7 @@ public sealed class CollectorEngine : IDisposable
                 try
                 {
                     using var doc = JsonDocument.Parse(line);
-                    if (doc.RootElement.TryGetProperty("id", out var id) && id.TryGetInt64(out var value)) _onDisk.Add(value);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("id", out var id) && id.TryGetInt64(out var value)) _onDisk.Add(value);
                 }
                 catch (JsonException)
                 {
@@ -160,20 +160,27 @@ public sealed class CollectorEngine : IDisposable
     public int FlushAa()
     {
         var path = Path.Combine(OutputFolder, "aa.jsonl");
+        var temp = path + ".tmp";
         try
         {
+            // Write beside the file and swap it in, so a failed write (or a later run that found fewer ranks) never
+            // leaves a half-written or emptied aa.jsonl.
             int n = 0;
-            using var w = new StreamWriter(path, false, new UTF8Encoding(false));
-            foreach (var r in _aa.Records)
+            using (var w = new StreamWriter(temp, false, new UTF8Encoding(false)))
             {
-                w.WriteLine(JsonSerializer.Serialize(AaToDictionary(r), JsonOptions));
-                n++;
+                foreach (var r in _aa.Records)
+                {
+                    w.WriteLine(JsonSerializer.Serialize(AaToDictionary(r), JsonOptions));
+                    n++;
+                }
             }
+            File.Move(temp, path, overwrite: true);
             return n;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             Report($"Cannot write {path}: {ex.Message}");
+            try { File.Delete(temp); } catch (Exception) { /* the temporary file is only a leftover */ }
             return 0;
         }
     }
@@ -231,7 +238,8 @@ public sealed class CollectorEngine : IDisposable
         }
         catch
         {
-            engine.Dispose();                // release items.jsonl when the run is cancelled or fails
+            engine.FlushAa();                // keep what was found before the run was cancelled or failed
+            engine.Dispose();                // and release items.jsonl
             throw;
         }
     }

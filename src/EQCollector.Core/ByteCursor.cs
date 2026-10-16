@@ -27,7 +27,7 @@ public sealed class ByteCursor
 
     private void Need(int n)
     {
-        if (n < 0 || _pos + n > _data.Length) throw new ParseException("ran out of data");
+        if (n < 0 || n > _data.Length - _pos) throw new ParseException("ran out of data");   // written so a huge n cannot overflow the sum
     }
 
     public void Skip(int n)
