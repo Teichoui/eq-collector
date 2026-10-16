@@ -15,16 +15,20 @@ Results are written as JSON lines in a folder on your computer. Nothing is sent 
 * **Live capture** -- needs [Npcap](https://npcap.com) installed and EQ Collector running as administrator (it offers
   to restart itself). Pick your adapter (the one with the default gateway is chosen), press *Start*, then play: zone,
   look at / loot / shop for items, and buy or reset AAs (the server sends the AA table then).
-* **From a script** -- `EQCollector.exe --file capture.pcapng --out folder --eq "D:\EQ test"`
+* **From a script** -- `EQCollector.exe --file capture.pcapng --out folder --eq "C:\path\to\EverQuest"`
 
 Output (in the chosen folder): `items.jsonl` (one distinct item per line, written as found) and `aa.jsonl` (one AA
-rank per line; written when you stop, press *Save AAs now*, or the file finishes).
+rank per line; written when you stop, press *Save AAs now*, or the file finishes, and merged into what the file already
+holds so a short run never shrinks it).
 
 ## Build
 
     dotnet build
-    dotnet test                                   # unit tests + the real-capture test
-    set EQC_FULL=1 & dotnet test                  # also the whole-capture AA test
+    dotnet test                                   # unit tests (the real-capture tests skip themselves)
+    set EQC_CAPTURE=C:\path\to\capture.pcapng
+    set EQC_STRINGS=C:\path\to\EverQuest          # optional: titles and descriptions
+    dotnet test                                   # now also decodes the capture; the confirmed items are the author's own
+    set EQC_FULL=1 & dotnet test                  # also the whole-capture AA test (slow)
     dotnet publish src/EQCollector.App -c Release -r win-x64 --self-contained true ^
         -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o publish
 

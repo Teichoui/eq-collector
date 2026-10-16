@@ -1,4 +1,4 @@
-﻿using EQCollector.Core;
+using EQCollector.Core;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -10,8 +10,9 @@ namespace EQCollector.Tests;
 /// </summary>
 public class RealCaptureTests
 {
-    private static readonly string Capture = Environment.GetEnvironmentVariable("EQC_CAPTURE") ?? "";
-    private static readonly string Strings = Environment.GetEnvironmentVariable("EQC_STRINGS") ?? @"D:\EQ test";
+    // No default paths: point EQC_CAPTURE at a capture file (and EQC_STRINGS at the EverQuest folder) to run these.
+    private static readonly string? Capture = Environment.GetEnvironmentVariable("EQC_CAPTURE");
+    private static readonly string? Strings = Environment.GetEnvironmentVariable("EQC_STRINGS");
     private readonly ITestOutputHelper _out;
 
     public RealCaptureTests(ITestOutputHelper output) => _out = output;
@@ -19,7 +20,7 @@ public class RealCaptureTests
     [Fact]
     public void The_four_confirmed_items_decode_from_the_first_40000_packets()
     {
-        if (!File.Exists(Capture)) { _out.WriteLine("capture not found, skipped"); return; }
+        if (string.IsNullOrEmpty(Capture) || !File.Exists(Capture)) { _out.WriteLine("set EQC_CAPTURE to a capture file to run this, skipped"); return; }
 
         var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));
         var engine = new CollectorEngine(dir);
@@ -53,10 +54,10 @@ public class RealCaptureTests
     public void The_whole_capture_gives_the_AA_table()
     {
         if (Environment.GetEnvironmentVariable("EQC_FULL") != "1") { _out.WriteLine("set EQC_FULL=1 to run, skipped"); return; }
-        if (!File.Exists(Capture)) { _out.WriteLine("capture not found, skipped"); return; }
+        if (string.IsNullOrEmpty(Capture) || !File.Exists(Capture)) { _out.WriteLine("set EQC_CAPTURE to a capture file to run this, skipped"); return; }
 
         var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));
-        var strings = Directory.Exists(Strings) ? ClientStrings.LoadFolder(Strings) : null;
+        var strings = !string.IsNullOrEmpty(Strings) && Directory.Exists(Strings) ? ClientStrings.LoadFolder(Strings) : null;
         var engine = CollectorEngine.ProcessFile(Capture, dir, strings, s => _out.WriteLine(s));
 
         _out.WriteLine($"{engine.ItemCount} items, {engine.AaCount} AA ranks");

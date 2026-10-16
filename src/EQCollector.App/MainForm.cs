@@ -36,6 +36,7 @@ public sealed class MainForm : Form
     private CancellationTokenSource? _cancel;
     private long _fileProgress;                 // written by the file worker, read by the UI timer (Interlocked / Volatile)
     private volatile bool _fileRunning;
+    private bool _engineClosed;                 // the engine has been flushed and closed: Stop must not do it again
     private Task? _fileTask;
 
     public MainForm()
@@ -225,7 +226,7 @@ public sealed class MainForm : Form
         try
         {
             var engine = NewEngine();
-            lock (_engineLock) _engine = engine;
+            lock (_engineLock) { _engine = engine; _engineClosed = false; }
             _capture = new LiveCapture(adapter.Device, _settings.Filter, udp => { lock (_engineLock) _engine?.Feed(udp); });
             _capture.Failed += ex => Log("Capture error: " + ex.Message);
             _capture.Start();
@@ -241,6 +242,7 @@ public sealed class MainForm : Form
             {
                 _engine?.Close();            // an engine that never ran must not stay selected ("Save AAs now" would use it)
                 _engine = null;
+                _engineClosed = true;
             }
         }
         UpdateModeEnabled();
@@ -258,7 +260,7 @@ public sealed class MainForm : Form
         var strings = LoadStrings();
         var outDir = _out.Text.Trim();
         _cancel = new CancellationTokenSource();
-        lock (_engineLock) _engine = null;          // so the statistics line shows this run, not an earlier session's engine
+        lock (_engineLock) { _engine = null; _engineClosed = false; }   // so the statistics line shows this run, not an earlier session's engine
         _fileRunning = true;
         Volatile.Write(ref _fileProgress, 0);
         _state.Text = "Reading the capture...";
@@ -271,7 +273,7 @@ public sealed class MainForm : Form
             try
             {
                 var engine = CollectorEngine.ProcessFile(path, outDir, strings, Log, n => Volatile.Write(ref _fileProgress, n), token);
-                lock (_engineLock) _engine = engine;
+                lock (_engineLock) { _engine = engine; _engineClosed = true; }   // ProcessFile already flushed and closed it
                 Log($"Done: {engine.Packets:N0} packets, {engine.ItemCount:N0} items, {engine.AaCount:N0} AA ranks. Saved to {outDir}");
             }
             catch (OperationCanceledException)
@@ -311,7 +313,7 @@ public sealed class MainForm : Form
         }
         lock (_engineLock)
         {
-            if (_engine != null && !_fileRunning)
+            if (_engine != null && !_fileRunning && !_engineClosed)
             {
                 try
                 {
@@ -321,6 +323,7 @@ public sealed class MainForm : Form
                 finally
                 {
                     _engine.Close();          // whatever happened above, release items.jsonl
+                    _engineClosed = true;
                 }
             }
         }

@@ -301,6 +301,56 @@ public class RobustnessTests
     }
 
     [Fact]
+    public void A_stray_response_does_not_replace_a_working_session()
+    {
+        var got = new List<AppPacket>();
+        var reader = new EQStreamReader(got.Add);
+        Connect(reader, 0xC0A80105, 50000);
+
+        // a response for some other session id, with a different key, arrives for the same endpoint
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, Concat(Be16(2), Be32(0x7A7A7A7A), new byte[] { 9, 9, 9, 9 }, new byte[3], Be32(64), new byte[4]), 3);
+
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, StoredData(1, App(0x1111, new byte[30])), 4);   // the real session still decodes
+        Assert.Equal(0x1111, Assert.Single(got).Opcode);
+    }
+
+    [Fact]
+    public void Flushing_AAs_never_shrinks_or_empties_an_existing_aa_file()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "aa.jsonl");
+        File.WriteAllText(path, "{\"aa_id\":2,\"rank\":1,\"title\":\"B\"}\n{ broken\n{\"aa_id\":1,\"rank\":3,\"title\":\"A3\"}\n{\"aa_id\":1,\"rank\":1,\"title\":\"A1\"}\n");
+        try
+        {
+            using (var engine = new CollectorEngine(dir))          // a run that found no AAs at all
+            {
+                Assert.Equal(3, engine.FlushAa());
+            }
+            var lines = File.ReadAllLines(path);
+            Assert.Equal(3, lines.Length);                          // the broken line is dropped, the rest kept, sorted
+            Assert.Contains("\"A1\"", lines[0]);
+            Assert.Contains("\"A3\"", lines[1]);
+            Assert.Contains("\"B\"", lines[2]);
+            Assert.False(File.Exists(path + ".tmp"));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void Flushing_with_no_AAs_anywhere_creates_no_file()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using var engine = new CollectorEngine(dir);
+            Assert.Equal(0, engine.FlushAa());
+            Assert.False(File.Exists(Path.Combine(dir, "aa.jsonl")));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void Spell_names_with_punctuation_are_read()
     {
         var path = TempFile(System.Text.Encoding.UTF8.GetBytes("100^Complete Heal^0^1\n101^Spirit of Wolf Rk. II^0^2\n102^Ro's Fiery Sundering, Rk. III!^0^3\n"));
@@ -313,6 +363,22 @@ public class RobustnessTests
             Assert.Equal(3, s.Spells.Count);
         }
         finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void A_string_id_too_big_for_an_int_skips_the_line_instead_of_stopping_the_load()
+    {
+        var spells = TempFile(System.Text.Encoding.UTF8.GetBytes("99999999999999999999^Too Big^0\n100^Complete Heal^0\n"));
+        var dbstr = TempFile(System.Text.Encoding.UTF8.GetBytes("99999999999999999999^1^Too Big^0^\n5^1^Innate Eminence^0^\n"));
+        try
+        {
+            var s = new ClientStrings();
+            s.LoadSpells(spells);
+            s.LoadDbStr(dbstr);
+            Assert.Equal("Complete Heal", Assert.Single(s.Spells).Value);
+            Assert.Equal("Innate Eminence", Assert.Single(s.Titles).Value);
+        }
+        finally { File.Delete(spells); File.Delete(dbstr); }
     }
 
     [Fact]

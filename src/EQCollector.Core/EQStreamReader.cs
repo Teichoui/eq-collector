@@ -208,10 +208,20 @@ public sealed class EQStreamReader
                     int session = (int)Be32(body);
                     var key = new[] { body[7], body[6], body[5], body[4] };   // the four key bytes, reversed
                     int maxLength = (int)Be32(body, 11);
-                    // The response alone names both ends, the session id, the key and the packet size limit, so a capture
-                    // that starts after the client's request (or lost it) still decodes. Checksums reject anything that
-                    // only looked like a response.
-                    AddClient(dstIp, dstPort, srcIp, maxLength, session, key, ts);
+                    if (_clients.TryGetValue((dstIp, dstPort), out var existing))
+                    {
+                        // A response only counts for the session it answers (the pending request, or the established session
+                        // again). A stray or delayed one must not replace a session that is working.
+                        if (existing.ServerIp == srcIp && existing.Session == session)
+                            AddClient(dstIp, dstPort, srcIp, maxLength, session, key, ts);
+                    }
+                    else
+                    {
+                        // No session known for this endpoint: the response alone names both ends, the session id, the key and
+                        // the packet size limit, so a capture that starts after the client's request (or lost it) still
+                        // decodes. Later checksums reject a session that only looked like one.
+                        AddClient(dstIp, dstPort, srcIp, maxLength, session, key, ts);
+                    }
                 }
                 break;
 

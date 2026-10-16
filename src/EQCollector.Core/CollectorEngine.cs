@@ -7,8 +7,9 @@ namespace EQCollector.Core;
 /// Feeds captured UDP packets through the session reader and the item and AA decoders, and writes what it finds:
 ///   items.jsonl  one line per distinct item (all 282 fields), appended as each is found. Items already in the file
 ///                from an earlier run are not written again;
-///   aa.jsonl     one line per AA rank, with title, description and spell name when the client's files are loaded
-///                (rewritten by <see cref="FlushAa"/>).
+///   aa.jsonl     one line per AA rank, with title, description and spell name when the client's files are loaded.
+///                <see cref="FlushAa"/> merges this run's ranks into what the file already holds (the newer capture
+///                wins for a rank both have), so a short or aborted run never shrinks a complete table.
 /// Works the same for a capture file and for live traffic. A problem writing to the output folder is reported through
 /// <see cref="Error"/> and stops the writing, but never throws into the capture.
 /// </summary>
@@ -22,6 +23,7 @@ public sealed class CollectorEngine : IDisposable
     private readonly Dictionary<long, ItemRecord> _items = new();    // this run
     private readonly HashSet<long> _onDisk = new();                   // ids already in items.jsonl
     private readonly Action<string>? _log;
+    private readonly Dictionary<(uint AaId, uint Rank), string> _aaOnDisk = new();   // lines already in aa.jsonl
     private StreamWriter? _itemsFile;
     private bool _writingFailed;
 
@@ -49,6 +51,7 @@ public sealed class CollectorEngine : IDisposable
         _aa = new AaFinder(aaOpcode, aaBit64);
         _reader = new EQStreamReader(OnApp) { OnCallbackError = ex => Report("A handler failed: " + ex.Message) };
         LoadExistingItemIds();
+        LoadExistingAa();
     }
 
     private string ItemsPath => Path.Combine(OutputFolder, "items.jsonl");
@@ -57,6 +60,37 @@ public sealed class CollectorEngine : IDisposable
     {
         _log?.Invoke(message);
         Error?.Invoke(message);
+    }
+
+    /// <summary>Reads the ranks already in aa.jsonl so a flush adds to them instead of replacing them.</summary>
+    private void LoadExistingAa()
+    {
+        var path = Path.Combine(OutputFolder, "aa.jsonl");
+        if (!File.Exists(path)) return;
+        try
+        {
+            foreach (var line in File.ReadLines(path))
+            {
+                if (line.Length == 0) continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(line);
+                    var root = doc.RootElement;
+                    if (root.ValueKind == JsonValueKind.Object
+                        && root.TryGetProperty("aa_id", out var id) && id.TryGetUInt32(out var aaId)
+                        && root.TryGetProperty("rank", out var rank) && rank.TryGetUInt32(out var r))
+                        _aaOnDisk[(aaId, r)] = line;
+                }
+                catch (JsonException)
+                {
+                }
+            }
+            if (_aaOnDisk.Count > 0) _log?.Invoke($"{_aaOnDisk.Count:N0} AA ranks are already in aa.jsonl; this run's ranks will be added to them.");
+        }
+        catch (IOException ex)
+        {
+            Report("Could not read the existing aa.jsonl: " + ex.Message);
+        }
     }
 
     /// <summary>Reads the ids already in items.jsonl, so a second run (or a restart) does not write the same items again.</summary>
@@ -156,26 +190,29 @@ public sealed class CollectorEngine : IDisposable
         };
     }
 
-    /// <summary>Writes aa.jsonl with every AA rank found so far. Returns how many were written (0 when it could not be written).</summary>
+    /// <summary>
+    /// Writes aa.jsonl: the ranks already in the file plus this run's (this run's win for a rank both have). Nothing is
+    /// written when there is nothing at all, and the swap is atomic, so the file is never emptied or half-written.
+    /// Returns how many ranks the file holds (0 when it could not be written).
+    /// </summary>
     public int FlushAa()
     {
         var path = Path.Combine(OutputFolder, "aa.jsonl");
         var temp = path + ".tmp";
+
+        var merged = new Dictionary<(uint AaId, uint Rank), string>(_aaOnDisk);
+        foreach (var r in _aa.Records) merged[(r.AaId, r.Rank)] = JsonSerializer.Serialize(AaToDictionary(r), JsonOptions);
+        if (merged.Count == 0) return 0;
+
         try
         {
-            // Write beside the file and swap it in, so a failed write (or a later run that found fewer ranks) never
-            // leaves a half-written or emptied aa.jsonl.
-            int n = 0;
             using (var w = new StreamWriter(temp, false, new UTF8Encoding(false)))
             {
-                foreach (var r in _aa.Records)
-                {
-                    w.WriteLine(JsonSerializer.Serialize(AaToDictionary(r), JsonOptions));
-                    n++;
-                }
+                foreach (var key in merged.Keys.OrderBy(k => k.AaId).ThenBy(k => k.Rank)) w.WriteLine(merged[key]);
             }
             File.Move(temp, path, overwrite: true);
-            return n;
+            foreach (var (key, line) in merged) _aaOnDisk[key] = line;
+            return merged.Count;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -184,7 +221,6 @@ public sealed class CollectorEngine : IDisposable
             return 0;
         }
     }
-
     public void Close()
     {
         try

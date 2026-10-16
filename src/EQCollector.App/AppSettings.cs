@@ -44,7 +44,6 @@ public sealed class AppSettings
         var candidates = new List<string>();
         foreach (var drive in DriveInfo.GetDrives().Where(d => d.DriveType == DriveType.Fixed))
         {
-            candidates.Add(Path.Combine(drive.Name, "EQ test"));
             candidates.Add(Path.Combine(drive.Name, "EverQuest"));
             candidates.Add(Path.Combine(drive.Name, "Program Files (x86)", "Sony", "EverQuest"));
             candidates.Add(Path.Combine(drive.Name, "Program Files (x86)", "Daybreak Game Company", "Installed Games", "EverQuest"));

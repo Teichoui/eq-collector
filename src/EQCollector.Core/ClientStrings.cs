@@ -34,7 +34,7 @@ public sealed class ClientStrings
         {
             var m = DbStr.Match(line.TrimEnd('\r', '\n'));
             if (!m.Success) continue;
-            int id = int.Parse(m.Groups[1].Value);
+            if (!int.TryParse(m.Groups[1].Value, out int id)) continue;      // an id too large for int: skip the line
             if (m.Groups[2].Value == "1") Titles[id] = m.Groups[3].Value;
             else if (m.Groups[2].Value == "4") Descriptions[id] = m.Groups[3].Value;
         }
@@ -45,7 +45,7 @@ public sealed class ClientStrings
         foreach (var line in File.ReadLines(path))
         {
             var m = SpellLine.Match(line);
-            if (m.Success) Spells[int.Parse(m.Groups[1].Value)] = m.Groups[2].Value;
+            if (m.Success && int.TryParse(m.Groups[1].Value, out int id)) Spells[id] = m.Groups[2].Value;
         }
     }
 }
