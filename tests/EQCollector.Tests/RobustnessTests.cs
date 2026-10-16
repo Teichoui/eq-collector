@@ -213,6 +213,31 @@ public class RobustnessTests
     }
 
     [Fact]
+    public void A_capture_written_by_the_PcapWriter_reads_back_the_same()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "eqc-" + Guid.NewGuid().ToString("N") + ".pcap");
+        var frames = new[] { UdpFrame(20 + 8 + 10, 10), UdpFrame(20 + 8 + 30, 30), UdpFrame(20 + 8 + 5, 5) };
+        try
+        {
+            using (var writer = new PcapWriter(path, FrameParser.LinkEthernet))
+            {
+                for (int i = 0; i < frames.Length; i++) writer.Write(1000.5 + i, frames[i]);
+                Assert.Equal(3, writer.Frames);
+            }
+            var read = PcapReader.ReadFrames(path).ToList();
+            Assert.Equal(3, read.Count);
+            for (int i = 0; i < 3; i++)
+            {
+                Assert.Equal(frames[i], read[i].Data);
+                Assert.Equal(FrameParser.LinkEthernet, read[i].LinkType);
+                Assert.Equal(1000.5 + i, read[i].Time, 3);
+            }
+            Assert.Equal(3, PcapReader.ReadUdp(path).Count());
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void A_stacked_vlan_frame_is_read()
     {
         var plain = UdpFrame(20 + 8 + 10, 10);

@@ -70,6 +70,9 @@ public sealed class LiveCapture : IDisposable
     /// <summary>Raised (on the capture thread) when handling a packet threw.</summary>
     public event Action<Exception>? Failed;
 
+    /// <summary>Every frame that passed the filter, as captured (link type, time in seconds, bytes) -- for saving the raw traffic.</summary>
+    public event Action<int, double, byte[]>? Frame;
+
     public LiveCapture(ILiveDevice device, string filter, Action<UdpPacket> onUdp)
     {
         _device = device;
@@ -106,6 +109,7 @@ public sealed class LiveCapture : IDisposable
         {
             var raw = e.GetPacket();
             double time = raw.Timeval.Seconds + raw.Timeval.MicroSeconds / 1e6;
+            Frame?.Invoke((int)raw.LinkLayerType, time, raw.Data);
             if (FrameParser.TryParseUdp((int)raw.LinkLayerType, raw.Data, time, out var udp)) _onUdp(udp);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)

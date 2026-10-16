@@ -30,6 +30,7 @@ public sealed class CollectorEngine : IDisposable
     public string OutputFolder { get; }
     public long Packets { get; private set; }
     public long AppPackets { get; private set; }
+    public int Sessions => _reader.SessionsSeen;
     public int ItemCount => _items.Count;
     public int AaCount => _aa.Count;
     public ushort? AaOpcode => _aa.Opcode;

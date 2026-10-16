@@ -65,6 +65,9 @@ public sealed class EQStreamReader
     private readonly Action<AppPacket> _onPacket;
     private readonly Dictionary<(uint Ip, int Port), Client> _clients = new();
 
+    /// <summary>How many game sessions have been set up since the reader was created (a new zone is a new session).</summary>
+    public int SessionsSeen { get; private set; }
+
     /// <summary>Called when the callback passed to the constructor throws; the packet is dropped and reading carries on.</summary>
     public Action<Exception>? OnCallbackError { get; set; }
 
@@ -151,6 +154,7 @@ public sealed class EQStreamReader
 
     private void AddClient(uint clientIp, int clientPort, uint serverIp, int maxLength, int session, byte[] key, double ts)
     {
+        if (key.Length > 0) SessionsSeen++;                  // a request has no key yet; count a session when its response gives one
         if (!_clients.ContainsKey((clientIp, clientPort)) && _clients.Count >= MaxClients)
         {
             var oldest = _clients.Values.MinBy(c => c.LastSeen)!;

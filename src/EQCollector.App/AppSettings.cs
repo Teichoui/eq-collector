@@ -9,6 +9,7 @@ public sealed class AppSettings
     public string EqFolder { get; set; } = "";
     public string CaptureFile { get; set; } = "";
     public string Adapter { get; set; } = "";
+    public bool SaveRawCapture { get; set; } = true;
     public string Filter { get; set; } = "udp and (src net 69.174 or dst net 69.174)";
 
     private static string FilePath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "EQCollector", "settings.json");

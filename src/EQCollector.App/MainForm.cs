@@ -25,6 +25,7 @@ public sealed class MainForm : Form
     private readonly Button _stop = new() { Text = "Stop", Width = 110, Height = 32, Enabled = false };
     private readonly Button _saveAa = new() { Text = "Save AAs now", AutoSize = true };
     private readonly Button _openOut = new() { Text = "Open output folder", AutoSize = true };
+    private readonly CheckBox _saveRaw = new() { Text = "Also save the raw capture (.pcap) while capturing, so problems can be analysed", AutoSize = true, Checked = true };
     private readonly Label _state = new() { AutoSize = true, Text = "Ready." };
     private readonly Label _stats = new() { AutoSize = true, Font = new Font("Consolas", 10f), Text = "" };
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, Font = new Font("Consolas", 9f) };
@@ -36,6 +37,10 @@ public sealed class MainForm : Form
     private CancellationTokenSource? _cancel;
     private long _fileProgress;                 // written by the file worker, read by the UI timer (Interlocked / Volatile)
     private volatile bool _fileRunning;
+    private PcapWriter? _raw;                   // the raw traffic of the live session (when the box is ticked)
+    private readonly object _rawLock = new();
+    private DateTime _liveStarted;
+    private bool _sessionHintShown;
     private bool _engineClosed;                 // the engine has been flushed and closed: Stop must not do it again
     private Task? _fileTask;
 
@@ -49,6 +54,7 @@ public sealed class MainForm : Form
         _out.Text = _settings.OutputFolder;
         _eq.Text = _settings.EqFolder;
         _file.Text = _settings.CaptureFile;
+        _saveRaw.Checked = _settings.SaveRawCapture;
 
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new Padding(12) };
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -65,7 +71,8 @@ public sealed class MainForm : Form
         layout.Controls.Add(Section("Folders",
             Row(new Label { Text = "Save results to", Width = 110, TextAlign = ContentAlignment.MiddleLeft }, _out, _browseOut),
             Row(new Label { Text = "EverQuest folder", Width = 110, TextAlign = ContentAlignment.MiddleLeft }, _eq, _browseEq),
-            new Label { Text = "The EverQuest folder (dbstr_us.txt, spells_us.txt) gives AA titles and descriptions; without it AAs are saved with ids only.", AutoSize = true, ForeColor = SystemColors.GrayText }), 0, 1);
+            new Label { Text = "The EverQuest folder (dbstr_us.txt, spells_us.txt) gives AA titles and descriptions; without it AAs are saved with ids only.", AutoSize = true, ForeColor = SystemColors.GrayText },
+            _saveRaw), 0, 1);
 
         layout.Controls.Add(Row(_start, _stop, _saveAa, _openOut, _state), 0, 2);
         layout.Controls.Add(_stats, 0, 3);
@@ -178,6 +185,7 @@ public sealed class MainForm : Form
         _settings.OutputFolder = _out.Text.Trim();
         _settings.EqFolder = _eq.Text.Trim();
         _settings.CaptureFile = _file.Text.Trim();
+        _settings.SaveRawCapture = _saveRaw.Checked;
         if (_adapter.SelectedItem is AdapterInfo a) _settings.Adapter = a.Display;
         _settings.Save();
     }
@@ -229,6 +237,9 @@ public sealed class MainForm : Form
             lock (_engineLock) { _engine = engine; _engineClosed = false; }
             _capture = new LiveCapture(adapter.Device, _settings.Filter, udp => { lock (_engineLock) _engine?.Feed(udp); });
             _capture.Failed += ex => Log("Capture error: " + ex.Message);
+            _liveStarted = DateTime.Now;
+            _sessionHintShown = false;
+            if (_saveRaw.Checked) _capture.Frame += SaveRawFrame;
             _capture.Start();
             _state.Text = "Capturing -- zone, look at items, buy or reset AAs.";
             Log($"Capturing on {adapter.Display}. Filter: {_settings.Filter}");
@@ -309,6 +320,7 @@ public sealed class MainForm : Form
         if (_capture != null)
         {
             try { _capture.Dispose(); } catch (Exception ex) { Log("While stopping: " + ex.Message); }
+            CloseRaw();
             _capture = null;
         }
         lock (_engineLock)
@@ -368,6 +380,43 @@ public sealed class MainForm : Form
         }
     }
 
+    private void SaveRawFrame(int linkType, double time, byte[] data)
+    {
+        lock (_rawLock)
+        {
+            try
+            {
+                if (_raw == null)
+                {
+                    Directory.CreateDirectory(_out.Text.Trim());
+                    _raw = new PcapWriter(Path.Combine(_out.Text.Trim(), $"capture-{DateTime.Now:yyyyMMdd-HHmmss}.pcap"), linkType);
+                    Log("Saving the raw traffic to " + _raw.Path);
+                }
+                _raw.Write(time, data);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Log("Cannot save the raw capture: " + ex.Message);
+                try { _raw?.Dispose(); } catch (IOException) { }
+                _raw = null;
+                _saveRaw.BeginInvoke(() => _saveRaw.Checked = false);          // stop trying
+            }
+        }
+    }
+
+    private void CloseRaw()
+    {
+        lock (_rawLock)
+        {
+            if (_raw == null) return;
+            var path = _raw.Path;
+            long frames = _raw.Frames;
+            try { _raw.Dispose(); } catch (IOException) { }
+            _raw = null;
+            Log($"Raw capture saved: {path} ({frames:N0} packets)");
+        }
+    }
+
     // ---- display ----------------------------------------------------------------------------------------------------
 
     private void RefreshStats()
@@ -376,7 +425,12 @@ public sealed class MainForm : Form
         {
             if (_engine != null)
             {
-                _stats.Text = $"Packets {_engine.Packets,12:N0}    Items {_engine.ItemCount,8:N0}    AA ranks {_engine.AaCount,6:N0}    AA packet type {(_engine.AaOpcode is { } op ? "0x" + op.ToString("x") : "not seen yet")}";
+                _stats.Text = $"Packets {_engine.Packets,10:N0}   Sessions {_engine.Sessions,4:N0}   Game packets {_engine.AppPackets,9:N0}   Items {_engine.ItemCount,7:N0}   AA ranks {_engine.AaCount,5:N0}   AA type {(_engine.AaOpcode is { } op ? "0x" + op.ToString("x") : "not seen")}";
+                if (_capture != null && !_sessionHintShown && _engine.Packets > 0 && _engine.Sessions == 0 && DateTime.Now - _liveStarted > TimeSpan.FromSeconds(30))
+                {
+                    _sessionHintShown = true;
+                    Log("Traffic is arriving but no game session has been seen. A session is recognised when it is set up, so zone to a new area (or log in) while capturing.");
+                }
             }
             else if (_fileRunning)
             {
