@@ -432,6 +432,7 @@ public sealed class MainForm : Form
         {
             if (_engine != null)
             {
+                if (_capture != null && !_engineClosed) _engine.MaybeAutoSaveAa();     // ranks that arrived at the end of a burst
                 _stats.Text = $"Packets {_engine.Packets:N0}  |  Sessions {_engine.Sessions:N0}  |  Game packets {_engine.AppPackets:N0}  |  Items {_engine.ItemCount:N0}  |  AA ranks {_engine.AaCount:N0}  |  AA type {(_engine.AaOpcode is { } op ? "0x" + op.ToString("x") : "not seen")}";
                 if (_capture != null && !_sessionHintShown && _engine.Packets > 0 && _engine.Sessions == 0 && DateTime.Now - _liveStarted > TimeSpan.FromSeconds(30))
                 {

@@ -30,8 +30,7 @@ public sealed class CollectorEngine : IDisposable
     private StreamWriter? _itemsFile;
     private bool _writingFailed;
     private bool _aaDirty;                         // ranks found since the file was last written
-    private bool _aaAutoSaveFailed;                // a write failed: stop retrying on every packet (the error was reported once)
-    private long _lastAaSave;                      // Now() when aa.jsonl was last written; 0 = never
+    private long _aaNextAutoSave;                  // Now() before which no automatic write is tried; 0 = no limit yet
     internal Func<long> Now = () => System.Diagnostics.Stopwatch.GetTimestamp();
 
     public string OutputFolder { get; }
@@ -48,6 +47,9 @@ public sealed class CollectorEngine : IDisposable
 
     /// <summary>The shortest time between two automatic writes of aa.jsonl.</summary>
     public TimeSpan AutoSaveInterval { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>How long to wait before trying again after an automatic write failed.</summary>
+    public TimeSpan AutoSaveRetry { get; set; } = TimeSpan.FromSeconds(30);
     public IReadOnlyCollection<ItemRecord> Items => _items.Values;
 
     public event Action<ItemRecord>? ItemFound;
@@ -159,7 +161,9 @@ public sealed class CollectorEngine : IDisposable
         }
 
         bool hadOpcode = _aa.Opcode != null;
+        int before = _aa.Count;
         var rank = _aa.OnPacket(p);
+        if (_aa.Count != before) _aaDirty = true;     // the packets buffered while the AA opcode was unknown decode without returning a rank
         if (!hadOpcode && _aa.Opcode != null) _log?.Invoke($"AA packets found (application opcode 0x{_aa.Opcode:x})");
         if (rank != null)
         {
@@ -171,14 +175,17 @@ public sealed class CollectorEngine : IDisposable
 
     internal void MarkAaChanged() => _aaDirty = true;
 
-    /// <summary>Saves aa.jsonl when ranks have arrived since the last write and the interval has passed. Driven by packets,
-    /// so the ranks at the end of a burst are written by the next packet (game traffic is continuous) or when it is stopped.</summary>
-    internal void MaybeAutoSaveAa()
+    /// <summary>Saves aa.jsonl when ranks have arrived since the last write and the interval has passed. Called for every
+    /// packet and by the caller's own timer (so the end of a burst is written even when the game goes quiet); the caller
+    /// must not call it while a packet is being fed.</summary>
+    public void MaybeAutoSaveAa()
     {
-        if (!AutoSaveAa || !_aaDirty || _aaAutoSaveFailed) return;
+        if (!AutoSaveAa || !_aaDirty) return;
         long now = Now();
-        if (_lastAaSave != 0 && now - _lastAaSave < AutoSaveInterval.TotalSeconds * System.Diagnostics.Stopwatch.Frequency) return;
-        if (FlushAa() == 0 && _aa.Count > 0) _aaAutoSaveFailed = true;      // FlushAa reported why; do not retry for every packet
+        if (now < _aaNextAutoSave) return;
+        // A failed write (FlushAa reported why) is retried after AutoSaveRetry, not on every packet: a file that is briefly
+        // locked recovers, and a permanent problem is not logged hundreds of times.
+        if (FlushAa() == 0) _aaNextAutoSave = now + (long)(AutoSaveRetry.TotalSeconds * System.Diagnostics.Stopwatch.Frequency);
     }
 
     private void AppendItem(ItemRecord item)
@@ -249,7 +256,7 @@ public sealed class CollectorEngine : IDisposable
             File.Move(temp, path, overwrite: true);
             foreach (var (key, line) in merged) _aaOnDisk[key] = line;
             _aaDirty = false;
-            _lastAaSave = Now();
+            _aaNextAutoSave = Now() + (long)(AutoSaveInterval.TotalSeconds * System.Diagnostics.Stopwatch.Frequency);
             return merged.Count;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

@@ -627,6 +627,40 @@ public class RobustnessTests
     }
 
     [Fact]
+    public void A_failed_live_AA_save_is_retried_later_instead_of_giving_up()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "aa.jsonl");
+        File.WriteAllText(path, "{\"aa_id\":1,\"rank\":1,\"title\":\"A1\"}\n");
+        try
+        {
+            long ticks = 1000;
+            var errors = new List<string>();
+            using var engine = new CollectorEngine(dir) { AutoSaveAa = true, Now = () => ticks };
+            engine.Error += errors.Add;
+
+            File.Delete(path);
+            Directory.CreateDirectory(path + ".tmp");                 // the temporary file cannot be created
+            engine.MarkAaChanged();
+            engine.MaybeAutoSaveAa();
+            Assert.Single(errors);
+            Assert.False(File.Exists(path));
+
+            Directory.Delete(path + ".tmp");                          // the problem goes away
+            ticks += System.Diagnostics.Stopwatch.Frequency * 5;       // too soon to retry: not tried, not logged again
+            engine.MaybeAutoSaveAa();
+            Assert.Single(errors);
+            Assert.False(File.Exists(path));
+
+            ticks += System.Diagnostics.Stopwatch.Frequency * 60;      // past the retry delay
+            engine.MaybeAutoSaveAa();
+            Assert.True(File.Exists(path));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void Flushing_with_no_AAs_anywhere_creates_no_file()
     {
         var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));
