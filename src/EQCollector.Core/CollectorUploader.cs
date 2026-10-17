@@ -198,9 +198,8 @@ public sealed class CollectorUploader : IDisposable
             if (!TryId(item, "id", out long id) || _state.Items.Contains(id)) continue;
             if (manifest != null && manifest.HasItem(id))
             {
-                _state.Items.Add(id);                      // the pulled list says the site has it: nothing to ask or send
-                onSite++;
-                continue;
+                onSite++;                                  // the pulled list says the site has it: nothing to ask or send. Not
+                continue;                                  // remembered in the state file: a list can be stale, and is re-read each round
             }
             var stripped = Strip(item);
             // An item the website rejected is skipped only while its record is unchanged; a corrected record is tried again.
@@ -249,8 +248,7 @@ public sealed class CollectorUploader : IDisposable
             bool declined = _state.Declined.TryGetValue(rid, out var refused) && refused == hash;
             if (!already && !declined && manifest != null && manifest.TryGetAa(rid, out bool siteHasText) && (siteHasText || !HasText(rank)))
             {
-                _state.Aa[rid] = hash;                     // the site has this rank (with its text, or we would add none)
-                continue;
+                continue;                                  // the site has this rank (with its text, or we would add none); not remembered, as above
             }
             if (!already && !declined) pending.Add((rid, hash, rank));
         }

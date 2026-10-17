@@ -26,6 +26,7 @@ public sealed class CollectorEngine : IDisposable
     private readonly HashSet<long> _onDisk = new();                   // ids already in items.jsonl
     private readonly Action<string>? _log;
     private readonly Dictionary<(uint AaId, uint Rank), string> _aaOnDisk = new();   // lines already in aa.jsonl
+    private bool _partialToRemove;                 // an earlier aa.partial.jsonl was merged in; delete it once aa.jsonl is written
     private bool _aaLoadFailed;                    // aa.jsonl could not be read completely: it must not be replaced
     private StreamWriter? _itemsFile;
     private bool _writingFailed;
@@ -87,28 +88,15 @@ public sealed class CollectorEngine : IDisposable
     private void LoadExistingAa()
     {
         var path = Path.Combine(OutputFolder, "aa.jsonl");
-        if (!File.Exists(path)) return;
-        var loaded = new Dictionary<(uint AaId, uint Rank), string>();     // only kept when the whole file was read
+        var partialPath = Path.Combine(OutputFolder, "aa.partial.jsonl");
         try
         {
-            foreach (var line in File.ReadLines(path))
+            if (File.Exists(path))
             {
-                if (line.Length == 0) continue;
-                try
-                {
-                    using var doc = JsonDocument.Parse(line);
-                    var root = doc.RootElement;
-                    if (root.ValueKind == JsonValueKind.Object
-                        && root.TryGetProperty("aa_id", out var id) && id.TryGetUInt32(out var aaId)
-                        && root.TryGetProperty("rank", out var rank) && rank.TryGetUInt32(out var r))
-                        loaded[(aaId, r)] = line;
-                }
-                catch (JsonException)
-                {
-                }
+                var loaded = ReadAaLines(path);                           // only kept when the whole file was read
+                foreach (var (key, line) in loaded) _aaOnDisk[key] = line;
+                if (_aaOnDisk.Count > 0) _log?.Invoke($"{_aaOnDisk.Count:N0} AA ranks are already in aa.jsonl; this run's ranks will be added to them.");
             }
-            foreach (var (key, line) in loaded) _aaOnDisk[key] = line;
-            if (_aaOnDisk.Count > 0) _log?.Invoke($"{_aaOnDisk.Count:N0} AA ranks are already in aa.jsonl; this run's ranks will be added to them.");
         }
         catch (IOException ex)
         {
@@ -116,7 +104,47 @@ public sealed class CollectorEngine : IDisposable
             // ranks go to aa.partial.jsonl instead.
             _aaLoadFailed = true;
             Report("Could not read the existing aa.jsonl completely: " + ex.Message + ". It will not be replaced; this run's ranks are saved to aa.partial.jsonl.");
+            return;
         }
+
+        // aa.jsonl can be written again, so a fallback file left by an earlier run is folded in (its ranks were captured
+        // later than what aa.jsonl held then) and removed once aa.jsonl has been written.
+        try
+        {
+            if (File.Exists(partialPath))
+            {
+                var fromPartial = ReadAaLines(partialPath);
+                foreach (var (key, line) in fromPartial) _aaOnDisk[key] = line;
+                _partialToRemove = true;
+                _log?.Invoke($"{fromPartial.Count:N0} AA ranks from an earlier aa.partial.jsonl will be merged into aa.jsonl.");
+            }
+        }
+        catch (IOException)
+        {
+            // left alone: it is merged next time
+        }
+    }
+
+    private static Dictionary<(uint AaId, uint Rank), string> ReadAaLines(string path)
+    {
+        var loaded = new Dictionary<(uint AaId, uint Rank), string>();
+        foreach (var line in File.ReadLines(path))
+        {
+            if (line.Length == 0) continue;
+            try
+            {
+                using var doc = JsonDocument.Parse(line);
+                var root = doc.RootElement;
+                if (root.ValueKind == JsonValueKind.Object
+                    && root.TryGetProperty("aa_id", out var id) && id.TryGetUInt32(out var aaId)
+                    && root.TryGetProperty("rank", out var rank) && rank.TryGetUInt32(out var r))
+                    loaded[(aaId, r)] = line;
+            }
+            catch (JsonException)
+            {
+            }
+        }
+        return loaded;
     }
 
     /// <summary>Reads the ids already in items.jsonl, so a second run (or a restart) does not write the same items again.</summary>
@@ -279,6 +307,11 @@ public sealed class CollectorEngine : IDisposable
                 foreach (var key in merged.Keys.OrderBy(k => k.AaId).ThenBy(k => k.Rank)) w.WriteLine(merged[key]);
             }
             File.Move(temp, path, overwrite: true);
+            if (_partialToRemove && !_aaLoadFailed)
+            {
+                try { File.Delete(Path.Combine(OutputFolder, "aa.partial.jsonl")); _partialToRemove = false; }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* merged again next time */ }
+            }
             foreach (var (key, line) in merged) _aaOnDisk[key] = line;
             _aaDirty = false;
             _aaNextAutoSave = Now() + (long)(AutoSaveInterval.TotalSeconds * System.Diagnostics.Stopwatch.Frequency);

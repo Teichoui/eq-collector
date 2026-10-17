@@ -76,15 +76,15 @@ public sealed class AutoUploader : IDisposable
     {
         try
         {
+            var batch = _take();                       // first, so what the capture finds is not left in the engine while the catch-up fails
+            _items.AddRange(batch.Items);
+            if (batch.Aa != null) _aa = batch.Aa;
+
             if (!_caughtUp)
             {
                 await _catchUp!(ct);
                 _caughtUp = true;
             }
-
-            var batch = _take();
-            _items.AddRange(batch.Items);
-            if (batch.Aa != null) _aa = batch.Aa;
             if (_items.Count == 0 && _aa == null) return Outcome.Ok;
 
             var summary = await _uploader.UploadAsync(_items, _aa ?? new List<IReadOnlyDictionary<string, object?>>(), ct);
