@@ -560,11 +560,13 @@ public sealed class MainForm : Form
         try
         {
             var ping = await uploader.PingAsync();
-            var site = await uploader.RefreshManifestAsync();
+            SiteManifest? site = null;
+            try { site = await uploader.RefreshManifestAsync(); }
+            catch (UploadUnavailableException ex) { Log("Connected, but the website's list could not be pulled (" + ex.Message + "); uploads will ask the site about each item instead."); }
             Log($"Connected to {ping.Site}. " + (ping.Trusted
                 ? "Your token adds new items and AA ranks directly."
                 : "Your token sends new items for review; AA ranks are not stored for this kind of token."));
-            Log($"The website has {site.ItemCount:N0} items and {site.AaCount:N0} AA ranks; only what is not there will be uploaded.");
+            if (site != null) Log($"The website has {site.ItemCount:N0} items and {site.AaCount:N0} AA ranks; only what is not there will be uploaded.");
             MessageBox.Show(this, ping.Trusted ? "Connected. Your token adds new items and AA ranks directly." : "Connected. Your token sends new items to the review queue; AA ranks are not stored for this kind of token.", "Website upload", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException or NotSupportedException or IOException or UnauthorizedAccessException)
