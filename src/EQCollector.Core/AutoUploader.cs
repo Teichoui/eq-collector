@@ -13,6 +13,8 @@ public sealed class AutoUploader : IDisposable
     private readonly CollectorUploader _uploader;
     private readonly Func<UploadBatch> _take;
     private readonly Action<string>? _log;
+    private readonly Func<CancellationToken, Task>? _catchUp;
+    private bool _caughtUp;
     private readonly CancellationTokenSource _cts = new();
     private readonly List<IReadOnlyDictionary<string, object?>> _items = new();
     private List<IReadOnlyDictionary<string, object?>>? _aa;
@@ -30,11 +32,15 @@ public sealed class AutoUploader : IDisposable
     /// <summary>False once the website refused the token.</summary>
     public bool Active => !_stopped;
 
-    public AutoUploader(CollectorUploader uploader, Func<UploadBatch> take, Action<string>? log = null)
+    /// <param name="catchUp">Run once before the first normal round (retried until it succeeds): sends what earlier runs
+    /// saved but never got to the website, e.g. because it was down when they stopped.</param>
+    public AutoUploader(CollectorUploader uploader, Func<UploadBatch> take, Action<string>? log = null, Func<CancellationToken, Task>? catchUp = null)
     {
         _uploader = uploader;
         _take = take;
         _log = log;
+        _catchUp = catchUp;
+        _caughtUp = catchUp == null;
     }
 
     public void Start() => _loop ??= Task.Run(LoopAsync);
@@ -70,6 +76,12 @@ public sealed class AutoUploader : IDisposable
     {
         try
         {
+            if (!_caughtUp)
+            {
+                await _catchUp!(ct);
+                _caughtUp = true;
+            }
+
             var batch = _take();
             _items.AddRange(batch.Items);
             if (batch.Aa != null) _aa = batch.Aa;
@@ -98,16 +110,25 @@ public sealed class AutoUploader : IDisposable
         {
             return Outcome.Ok;
         }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            _log?.Invoke("Upload will retry: " + ex.Message);       // anything unexpected must not end the loop silently
+            return Outcome.Unavailable;
+        }
     }
 
-    /// <summary>Stops the loop and makes one last attempt to send what is still waiting (bounded by <paramref name="finalWait"/>).</summary>
-    public async Task StopAsync(TimeSpan finalWait)
+    /// <summary>
+    /// Stops the loop and makes one last attempt to send what is still waiting (bounded by <paramref name="finalWait"/>).
+    /// False when something could not be sent; it is saved in the results folder, and the next live run (or
+    /// "upload saved files") sends it.
+    /// </summary>
+    public async Task<bool> StopAsync(TimeSpan finalWait)
     {
         _cts.Cancel();
         try { if (_loop != null) await _loop; } catch (OperationCanceledException) { }
-        if (_stopped) return;
+        if (_stopped) return false;
         using var final = new CancellationTokenSource(finalWait);
-        await RoundAsync(final.Token);
+        return await RoundAsync(final.Token) == Outcome.Ok && _items.Count == 0;
     }
 
     public void Dispose()

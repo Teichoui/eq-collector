@@ -56,6 +56,8 @@ public class UploaderTests
     [Theory]
     [InlineData("http://norrathcodex.com")]
     [InlineData("http://8.8.8.8")]
+    [InlineData("http://collector.lan")]
+    [InlineData("http://printer.local")]
     [InlineData("ftp://norrathcodex.com")]
     [InlineData("")]
     [InlineData("not a url at all")]
@@ -96,6 +98,7 @@ public class UploaderTests
             Assert.Equal(0, second.ItemsChecked);
             Assert.Equal(before, site.Requests.Count);                  // not even asked again
 
+            CollectorUploader.ForgetSharedStates();                       // as if the program had been restarted
             using var again = Make(site, dir);                           // a new run remembers too
             await again.UploadAsync(new[] { Item(1), Item(2), Item(3) }, NoAa);
             Assert.Equal(before, site.Requests.Count);
@@ -248,16 +251,16 @@ public class UploaderTests
             using var uploader = Make(site, dir);
             var batches = new Queue<UploadBatch>();
             batches.Enqueue(new UploadBatch(new() { Item(1) }, null));
-            var messages = new List<string>();
-            using var auto = new AutoUploader(uploader, () => batches.Count > 0 ? batches.Dequeue() : new UploadBatch(new(), null), messages.Add) { Interval = TimeSpan.FromMilliseconds(30) };
+            var messages = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            using var auto = new AutoUploader(uploader, () => batches.Count > 0 ? batches.Dequeue() : new UploadBatch(new(), null), messages.Enqueue) { Interval = TimeSpan.FromMilliseconds(30) };
             auto.Start();
 
             await WaitFor(() => messages.Any(m => m.StartsWith("Upload will retry")));
             Assert.Equal(0, auto.ItemsAdded);
 
             down = false;
-            await WaitFor(() => auto.ItemsAdded == 1, seconds: 15);        // the pause after a failure grows, so allow time
-            Assert.Contains(messages, m => m.Contains("reachable again"));
+            await WaitFor(() => messages.Any(m => m.Contains("reachable again")), seconds: 15);   // logged after the successful round; the pause after a failure grows, so allow time
+            Assert.Equal(1, auto.ItemsAdded);
             await auto.StopAsync(TimeSpan.FromSeconds(2));
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
@@ -271,14 +274,112 @@ public class UploaderTests
         {
             var site = new FakeSite { Answer = (_, _) => new HttpResponseMessage(HttpStatusCode.Unauthorized) };
             using var uploader = Make(site, dir);
-            var messages = new List<string>();
-            using var auto = new AutoUploader(uploader, () => new UploadBatch(new() { Item(1) }, null), messages.Add) { Interval = TimeSpan.FromMilliseconds(20) };
+            var messages = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            using var auto = new AutoUploader(uploader, () => new UploadBatch(new() { Item(1) }, null), messages.Enqueue) { Interval = TimeSpan.FromMilliseconds(20) };
             auto.Start();
             await WaitFor(() => !auto.Active);
             await Task.Delay(150);
             Assert.Single(messages.Where(m => m.StartsWith("Upload stopped")));
             Assert.Single(site.Requests);                               // it did not keep knocking
             await auto.StopAsync(TimeSpan.FromSeconds(1));
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task A_reply_of_the_wrong_shape_is_unavailable_not_a_crash()
+    {
+        var dir = TempDir();
+        try
+        {
+            foreach (var reply in new[] { "[1,2]", "{}", "{\"missing_items\":[\"x\"]}", "{\"missing_items\":5}", "not json" })
+            {
+                var site = new FakeSite { Answer = (_, _) => FakeSite.Ok(reply) };
+                using var up = Make(site, dir);
+                await Assert.ThrowsAsync<UploadUnavailableException>(() => up.UploadAsync(new[] { Item(1) }, NoAa));
+            }
+            var wrongCount = new FakeSite { Answer = (_, _) => FakeSite.Ok("{\"aa_saved\":\"1\"}") };
+            using var up2 = Make(wrongCount, dir);
+            await Assert.ThrowsAsync<UploadUnavailableException>(() => up2.UploadAsync(new List<IReadOnlyDictionary<string, object?>>(), new[] { Aa(1) }));
+            var ping = new FakeSite { Answer = (_, _) => FakeSite.Ok("[]") };
+            using var up3 = Make(ping, dir);
+            await Assert.ThrowsAsync<UploadUnavailableException>(() => up3.PingAsync());
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void Saved_files_can_be_read_while_the_capture_still_has_them_open()
+    {
+        var dir = TempDir();
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var path = Path.Combine(dir, "items.jsonl");
+            using var writer = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);       // like the engine's open items.jsonl
+            writer.Write(Encoding.UTF8.GetBytes("{\"id\":1,\"name\":\"A\"}\n"));
+            writer.Flush();
+            Assert.Single(CollectorUploader.ReadJsonLines(path));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task The_background_upload_first_sends_what_earlier_runs_saved()
+    {
+        var dir = TempDir();
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "items.jsonl"), "{\"id\":42,\"name\":\"Left over\"}\n");
+            var site = new FakeSite
+            {
+                Answer = (path, _) => path == "/api/collector/check" ? FakeSite.Ok("{\"missing_items\":[42]}") : FakeSite.Ok("{\"items_added\":1}"),
+            };
+            using var uploader = Make(site, dir);
+            using var auto = new AutoUploader(uploader, () => new UploadBatch(new(), null), null, ct => uploader.UploadFolderAsync(dir, ct)) { Interval = TimeSpan.FromMilliseconds(20) };
+            auto.Start();
+            await WaitFor(() => uploader.KnownItems == 1);
+            Assert.True(await auto.StopAsync(TimeSpan.FromSeconds(2)));
+            Assert.Contains(site.Requests, r => r.Path == "/api/collector/upload" && r.Body.Contains("Left over"));
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task A_final_attempt_that_fails_is_reported_as_not_everything_sent()
+    {
+        var dir = TempDir();
+        try
+        {
+            var site = new FakeSite { Answer = (_, _) => throw new HttpRequestException("down") };
+            using var uploader = Make(site, dir);
+            int calls = 0;
+            using var auto = new AutoUploader(uploader, () => calls++ == 0 ? new UploadBatch(new() { Item(1) }, null) : new UploadBatch(new(), null)) { Interval = TimeSpan.FromHours(1) };
+            Assert.False(await auto.StopAsync(TimeSpan.FromSeconds(2)));
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task Two_uploaders_on_one_folder_do_not_overwrite_each_others_memory()
+    {
+        var dir = TempDir();
+        try
+        {
+            var site = new FakeSite
+            {
+                Answer = (path, json) => path == "/api/collector/check" ? FakeSite.Ok("{\"missing_items\":[]}") : FakeSite.Ok("{}"),
+            };
+            using var a = Make(site, dir);
+            using var b = Make(site, dir);
+            await a.UploadAsync(new[] { Item(1) }, NoAa);
+            await b.UploadAsync(new[] { Item(2) }, NoAa);
+            Assert.Equal(2, a.KnownItems);                                // one memory, not two stale copies
+            Assert.Equal(2, b.KnownItems);
+            CollectorUploader.ForgetSharedStates();
+            using var c = Make(site, dir);
+            Assert.Equal(2, c.KnownItems);                                // and what is on disk has both
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
     }

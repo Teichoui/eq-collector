@@ -44,7 +44,12 @@ public sealed class CollectorUploader : IDisposable
     private readonly string _statePath;
     private readonly Action<string>? _log;
     private readonly string _server;
-    private UploadState _state;
+    private readonly UploadState _state;
+
+    // Several uploaders can exist at once (the background one and a manual "upload saved files"): they take turns, and they
+    // share one in-memory copy of each state file, so none writes a stale copy over another's newer one.
+    private static readonly SemaphoreSlim Gate = new(1, 1);
+    private static readonly Dictionary<string, UploadState> SharedStates = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>How long to wait when the server says "too many requests" and gives no time (tests set it to zero).</summary>
     public TimeSpan RateLimitWait { get; set; } = TimeSpan.FromSeconds(20);
@@ -63,7 +68,13 @@ public sealed class CollectorUploader : IDisposable
         _http.DefaultRequestHeaders.Accept.ParseAdd("application/json");
         Directory.CreateDirectory(stateFolder);
         _statePath = Path.Combine(stateFolder, "upload-state.json");
-        _state = UploadState.Load(_statePath, _server);
+        _statePath = Path.GetFullPath(_statePath);
+        lock (SharedStates)
+        {
+            if (!SharedStates.TryGetValue(_statePath, out var state) || !string.Equals(state.Server, _server, StringComparison.OrdinalIgnoreCase))
+                SharedStates[_statePath] = state = UploadState.Load(_statePath, _server);
+            _state = state;
+        }
     }
 
     public string Server => _server;
@@ -71,6 +82,9 @@ public sealed class CollectorUploader : IDisposable
     /// <summary>Items and AA ranks already confirmed by the server (this app's memory of it).</summary>
     public int KnownItems => _state.Items.Count;
     public int KnownAa => _state.Aa.Count;
+
+    /// <summary>Forgets the shared in-memory state of every state file (tests that start a "new run").</summary>
+    internal static void ForgetSharedStates() { lock (SharedStates) SharedStates.Clear(); }
 
     /// <summary>
     /// The address must be https, so the token is never sent in the clear -- except to this computer or a private network
@@ -90,7 +104,9 @@ public sealed class CollectorUploader : IDisposable
 
     private static bool IsLocalHost(string host)
     {
-        if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".local", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".lan", StringComparison.OrdinalIgnoreCase)) return true;
+        // A name is only trusted when it is "localhost": any other name (.lan, .local, ...) could be pointed anywhere by DNS or
+        // a hosts file, so a private-network test site is addressed by its numeric address.
+        if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
         if (!IPAddress.TryParse(host, out var ip)) return false;
         if (IPAddress.IsLoopback(ip)) return true;
         var b = ip.GetAddressBytes();
@@ -103,9 +119,7 @@ public sealed class CollectorUploader : IDisposable
     {
         using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, "api/collector/ping"), ct);
         var doc = await ReadJson(response, ct);
-        return new PingResult(doc.TryGetProperty("ok", out var ok) && ok.GetBoolean(),
-            doc.TryGetProperty("trusted", out var t) && t.GetBoolean(),
-            doc.TryGetProperty("site", out var s) ? s.GetString() ?? "" : "");
+        return new PingResult(Bool(doc, "ok"), Bool(doc, "trusted"), Text(doc, "site"));
     }
 
     /// <summary>
@@ -114,6 +128,14 @@ public sealed class CollectorUploader : IDisposable
     /// </summary>
     public async Task<UploadSummary> UploadAsync(IReadOnlyCollection<IReadOnlyDictionary<string, object?>> items,
         IReadOnlyCollection<IReadOnlyDictionary<string, object?>> aa, CancellationToken ct = default)
+    {
+        await Gate.WaitAsync(ct);
+        try { return await UploadCoreAsync(items, aa, ct); }
+        finally { Gate.Release(); }
+    }
+
+    private async Task<UploadSummary> UploadCoreAsync(IReadOnlyCollection<IReadOnlyDictionary<string, object?>> items,
+        IReadOnlyCollection<IReadOnlyDictionary<string, object?>> aa, CancellationToken ct)
     {
         int checkedCount = 0, sent = 0, added = 0, queued = 0, aaSent = 0, aaSaved = 0, rejected = 0;
 
@@ -154,7 +176,7 @@ public sealed class CollectorUploader : IDisposable
             using var response = await SendAsync(() => JsonRequest("api/collector/upload", new Dictionary<string, object?> { ["aa"] = batch.Select(b => b.Record).ToList() }), ct);
             var doc = await ReadJson(response, ct);
             aaSent += batch.Length;
-            aaSaved += doc.TryGetProperty("aa_saved", out var saved) ? saved.GetInt32() : 0;
+            aaSaved += Int(doc, "aa_saved");
             // Ranks the server declined (a non-trusted token) are remembered too, or every round would send them again.
             foreach (var b in batch) _state.Aa[b.Id] = b.Hash;
             _state.Save(_statePath);
@@ -173,7 +195,10 @@ public sealed class CollectorUploader : IDisposable
     {
         var list = new List<IReadOnlyDictionary<string, object?>>();
         if (!File.Exists(path)) return list;
-        foreach (var line in File.ReadLines(path))
+        // Shared read: the capture may still have the file open for writing.
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        while (reader.ReadLine() is { } line)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
             try
@@ -196,8 +221,15 @@ public sealed class CollectorUploader : IDisposable
         using var response = await SendAsync(() => JsonRequest("api/collector/check", new Dictionary<string, object?> { ["item_ids"] = ids.ToList() }), ct);
         var doc = await ReadJson(response, ct);
         var missing = new List<long>();
-        if (doc.TryGetProperty("missing_items", out var arr) && arr.ValueKind == JsonValueKind.Array)
-            foreach (var e in arr.EnumerateArray()) missing.Add(e.GetInt64());
+        if (doc.ValueKind == JsonValueKind.Object && doc.TryGetProperty("missing_items", out var arr) && arr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var e in arr.EnumerateArray())
+            {
+                if (e.ValueKind != JsonValueKind.Number || !e.TryGetInt64(out long id)) throw Unexpected();
+                missing.Add(id);
+            }
+        }
+        else throw Unexpected();
         return missing;
     }
 
@@ -223,8 +255,7 @@ public sealed class CollectorUploader : IDisposable
         }
 
         var doc = await ReadJson(response, ct);
-        int Get(string name) => doc.TryGetProperty(name, out var v) ? v.GetInt32() : 0;
-        return new ItemResult(batch.Count, Get("items_added"), Get("items_queued"), 0);
+        return new ItemResult(batch.Count, Int(doc, "items_added"), Int(doc, "items_queued"), 0);
     }
 
     private static HttpRequestMessage JsonRequest(string path, object body)
@@ -296,6 +327,26 @@ public sealed class CollectorUploader : IDisposable
     }
 
     // ---- helpers ----------------------------------------------------------------------------------------------------
+
+    private static UploadUnavailableException Unexpected() => new("The website's answer was not what was expected (is the address right?).");
+
+    // A reply of the wrong shape (a wrong address, a proxy, a changed server) is "unavailable", never a crash.
+    private static int Int(JsonElement doc, string name)
+    {
+        if (doc.ValueKind != JsonValueKind.Object) throw Unexpected();
+        if (!doc.TryGetProperty(name, out var v)) return 0;
+        if (v.ValueKind != JsonValueKind.Number || !v.TryGetInt32(out int n)) throw Unexpected();
+        return n;
+    }
+
+    private static bool Bool(JsonElement doc, string name)
+    {
+        if (doc.ValueKind != JsonValueKind.Object) throw Unexpected();
+        return doc.TryGetProperty(name, out var v) && v.ValueKind is JsonValueKind.True;
+    }
+
+    private static string Text(JsonElement doc, string name)
+        => doc.ValueKind == JsonValueKind.Object && doc.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
 
     /// <summary>Drops fields that are not game data: the crafter's name is a player's name.</summary>
     private static IReadOnlyDictionary<string, object?> Strip(IReadOnlyDictionary<string, object?> item)

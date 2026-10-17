@@ -287,6 +287,7 @@ public sealed class MainForm : Form
             Log("Could not start capture: " + ex.Message);
             _capture?.Dispose();
             _capture = null;
+            DiscardUploader();
             lock (_engineLock)
             {
                 _engine?.Close();            // an engine that never ran must not stay selected ("Save AAs now" would use it)
@@ -356,7 +357,7 @@ public sealed class MainForm : Form
             var r = uploader.UploadFolderAsync(folder).GetAwaiter().GetResult();
             Log($"Uploaded: {r.ItemsAdded:N0} new items added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved.");
         }
-        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException)
+        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException or IOException or UnauthorizedAccessException)
         {
             Log("Upload: " + ex.Message);
         }
@@ -495,14 +496,28 @@ public sealed class MainForm : Form
     /// <summary>Starts the background upload for a live capture. False when the settings are not usable (already explained).</summary>
     private bool StartUploader(CollectorEngine engine)
     {
+        DiscardUploader();               // never two loops on one engine
         var uploader = BuildUploader();
         if (uploader == null) return false;
         engine.CollectForUpload = true;
         _liveUploader = uploader;
-        _autoUploader = new AutoUploader(uploader, () => { lock (_engineLock) return _engine?.TakeUpload() ?? new UploadBatch(new(), null); }, Log);
+        string folder = _out.Text.Trim();
+        _autoUploader = new AutoUploader(uploader, () => { lock (_engineLock) return _engine?.TakeUpload() ?? new UploadBatch(new(), null); }, Log,
+            ct => uploader.UploadFolderAsync(folder, ct));      // first: whatever earlier runs saved but never got sent
         _autoUploader.Start();
         Log($"Uploading new items and AA ranks to {uploader.Server}.");
         return true;
+    }
+
+    /// <summary>Drops a background upload without a final round (the capture never started).</summary>
+    private void DiscardUploader()
+    {
+        var auto = _autoUploader;
+        var uploader = _liveUploader;
+        _autoUploader = null;
+        _liveUploader = null;
+        auto?.Dispose();
+        uploader?.Dispose();
     }
 
     /// <summary>After Stop: one last attempt to send what is waiting, off the UI thread.</summary>
@@ -517,8 +532,9 @@ public sealed class MainForm : Form
         {
             try
             {
-                await auto.StopAsync(TimeSpan.FromSeconds(15));
-                Log($"Upload finished: {auto.ItemsAdded} new items added, {auto.ItemsQueued} queued for review, {auto.AaSaved} AA ranks saved.");
+                bool all = await auto.StopAsync(TimeSpan.FromSeconds(15));
+                Log($"Upload finished: {auto.ItemsAdded} new items added, {auto.ItemsQueued} queued for review, {auto.AaSaved} AA ranks saved."
+                    + (all ? "" : " Some could not be sent; they are saved in the results folder and go up next time (or press \"Upload saved files now\")."));
             }
             catch (Exception ex)
             {
@@ -545,7 +561,7 @@ public sealed class MainForm : Form
                 : "Your token sends new items for review; AA ranks are not stored for this kind of token."));
             MessageBox.Show(this, ping.Trusted ? "Connected. Your token adds new items and AA ranks directly." : "Connected. Your token sends new items to the review queue; AA ranks are not stored for this kind of token.", "Website upload", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
-        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException)
+        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or IOException or UnauthorizedAccessException)
         {
             Log("Upload test: " + ex.Message);
             MessageBox.Show(this, ex.Message, "Website upload", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -565,7 +581,7 @@ public sealed class MainForm : Form
             var r = await Task.Run(() => uploader.UploadFolderAsync(folder));
             Log($"Done: {r.ItemsChecked:N0} items checked, {r.ItemsAdded:N0} added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved.");
         }
-        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException)
+        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or IOException or UnauthorizedAccessException)
         {
             Log("Upload: " + ex.Message);
         }

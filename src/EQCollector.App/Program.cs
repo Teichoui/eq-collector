@@ -58,7 +58,7 @@ internal static class Program
             Console.WriteLine($"Uploaded: {r.ItemsChecked:N0} items checked, {r.ItemsAdded:N0} added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved, {r.Rejected:N0} rejected.");
             return 0;
         }
-        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException)
+        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException or IOException or UnauthorizedAccessException)
         {
             Console.Error.WriteLine("EQCollector: " + ex.Message);
             return 1;

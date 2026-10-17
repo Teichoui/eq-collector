@@ -36,8 +36,8 @@ have and sends only those, plus the AA ranks.
 * What was sent is remembered in `upload-state.json` in the results folder, so nothing is sent twice. If the website
   or your connection is down, items stay queued and are retried with a growing pause; a refused token stops the upload
   with one message. Capturing is never affected.
-* The token is stored encrypted for your Windows user (DPAPI) and sent only over https (a private-network or localhost
-  address may use http, for a test site). No character names, chat or anything else is sent; a crafter's name on an item
+* The token is stored encrypted for your Windows user (DPAPI) and sent only over https (only localhost or a numeric private-network
+  address like 192.168.x.x may use http, for a test site; a name such as .lan is not trusted). No character names, chat or anything else is sent; a crafter's name on an item
   is dropped.
 * *Upload saved files now* sends what a results folder already holds; a capture-file run uploads when it finishes.
 * From a script: `EQCollector.exe --upload-folder folder [--server https://...]` or add `--upload` to a `--file` run; the
