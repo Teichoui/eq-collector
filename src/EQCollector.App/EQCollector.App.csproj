@@ -9,7 +9,7 @@
     <AssemblyName>EQCollector</AssemblyName>
     <RootNamespace>EQCollector.App</RootNamespace>
     <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
-    <Version>0.1.4</Version>
+    <Version>0.2.0</Version>
     <Product>EQ Collector</Product>
     <Company>Norrath Codex</Company>
   </PropertyGroup>
@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <PackageReference Include="SharpPcap" Version="6.3.1" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
   </ItemGroup>
 
 </Project>

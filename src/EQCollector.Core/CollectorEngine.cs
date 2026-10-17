@@ -30,6 +30,8 @@ public sealed class CollectorEngine : IDisposable
     private StreamWriter? _itemsFile;
     private bool _writingFailed;
     private bool _aaDirty;                         // ranks found since the file was last written
+    private readonly List<IReadOnlyDictionary<string, object?>> _uploadItems = new();   // found since the last TakeUpload
+    private bool _uploadAaChanged;
     private long _aaNextAutoSave;                  // Now() before which no automatic write is tried; 0 = no limit yet
     internal Func<long> Now = () => System.Diagnostics.Stopwatch.GetTimestamp();
 
@@ -41,6 +43,9 @@ public sealed class CollectorEngine : IDisposable
     public int AaCount => _aa.Count;
     public ushort? AaOpcode => _aa.Opcode;
     public bool AaBit64 => _aa.Bit64;
+
+    /// <summary>Keep each new item (and the ranks' changes) for <see cref="TakeUpload"/>; set when uploading to the website.</summary>
+    public bool CollectForUpload { get; set; }
 
     /// <summary>Write aa.jsonl while ranks arrive (used for live capture); a file run writes it once at the end.</summary>
     public bool AutoSaveAa { get; set; }
@@ -156,6 +161,7 @@ public sealed class CollectorEngine : IDisposable
             {
                 if (!_items.TryAdd(found.Item.Id, found.Item)) continue;
                 if (_onDisk.Add(found.Item.Id)) AppendItem(found.Item);
+                if (CollectForUpload) _uploadItems.Add(ItemToDictionary(found.Item).ToDictionary(kv => kv.Key, kv => (object?)kv.Value));
                 ItemFound?.Invoke(found.Item);
             }
         }
@@ -164,6 +170,7 @@ public sealed class CollectorEngine : IDisposable
         int before = _aa.Count;
         var rank = _aa.OnPacket(p);
         if (_aa.Count != before) _aaDirty = true;     // the packets buffered while the AA opcode was unknown decode without returning a rank
+        if (_aa.Count != before || rank != null) _uploadAaChanged = true;
         if (!hadOpcode && _aa.Opcode != null) _log?.Invoke($"AA packets found (application opcode 0x{_aa.Opcode:x})");
         if (rank != null)
         {
@@ -174,6 +181,24 @@ public sealed class CollectorEngine : IDisposable
     }
 
     internal void MarkAaChanged() => _aaDirty = true;
+
+    /// <summary>
+    /// What the capture found since the last call, for the website upload: the new items, and all AA ranks when any rank
+    /// changed (null otherwise). Items already in items.jsonl from an earlier run are not included here, so a restart does
+    /// not re-queue them -- <see cref="CollectorUploader.UploadFolderAsync"/> covers those.
+    /// </summary>
+    public UploadBatch TakeUpload()
+    {
+        var items = new List<IReadOnlyDictionary<string, object?>>(_uploadItems);
+        _uploadItems.Clear();
+        List<IReadOnlyDictionary<string, object?>>? aa = null;
+        if (_uploadAaChanged)
+        {
+            _uploadAaChanged = false;
+            aa = _aa.Records.Select(r => (IReadOnlyDictionary<string, object?>)AaToDictionary(r)).ToList();
+        }
+        return new UploadBatch(items, aa);
+    }
 
     /// <summary>Saves aa.jsonl when ranks have arrived since the last write and the interval has passed. Called for every
     /// packet and by the caller's own timer (so the end of a burst is written even when the game goes quiet); the caller

@@ -4,7 +4,8 @@ A single Windows program that reads what the EverQuest server sends -- live whil
 file -- and decodes **items** (all 282 fields) and **alternate advancement abilities** (every rank, with titles and
 descriptions). No MacroQuest.
 
-Results are written as JSON lines in a folder on your computer. Nothing is sent anywhere.
+Results are written as JSON lines in a folder on your computer. Nothing is sent anywhere unless you turn on the
+[website upload](#website-upload).
 
 ## Run it
 
@@ -21,6 +22,26 @@ Output (in the chosen folder): `items.jsonl` (one distinct item per line, writte
 rank per line; in live capture it is rewritten every couple of seconds while ranks arrive, and also when you stop or press
 *Save AAs now*; a capture file writes it when it finishes. It is merged into what the file already holds, so a short run
 never shrinks it).
+
+## Website upload
+
+Optional. Tick *Upload new items and AA ranks to the website while capturing*, enter the website (default
+`https://norrathcodex.com`) and your upload token (the site's *capture-token* page, same token the MacroQuest tools use),
+press *Test*. While you capture, every few seconds the app asks the site which of the items it found the site does not
+have and sends only those, plus the AA ranks.
+
+* A moderator/admin token adds new items and AA ranks directly; any other token puts new items in the site's review
+  queue (AA ranks are not stored for those).
+* Nothing existing is changed: items the site already has are skipped.
+* What was sent is remembered in `upload-state.json` in the results folder, so nothing is sent twice. If the website
+  or your connection is down, items stay queued and are retried with a growing pause; a refused token stops the upload
+  with one message. Capturing is never affected.
+* The token is stored encrypted for your Windows user (DPAPI) and sent only over https (a private-network or localhost
+  address may use http, for a test site). No character names, chat or anything else is sent; a crafter's name on an item
+  is dropped.
+* *Upload saved files now* sends what a results folder already holds; a capture-file run uploads when it finishes.
+* From a script: `EQCollector.exe --upload-folder folder [--server https://...]` or add `--upload` to a `--file` run; the
+  token comes from the `EQC_TOKEN` environment variable or what the window saved.
 
 ## Build
 

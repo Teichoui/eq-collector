@@ -1,4 +1,7 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace EQCollector.App;
 
@@ -11,6 +14,33 @@ public sealed class AppSettings
     public string Adapter { get; set; } = "";
     public bool SaveRawCapture { get; set; } = true;
     public string Filter { get; set; } = "udp and (src net 69.174 or dst net 69.174)";
+
+    /// <summary>Send new items and AA ranks to the website while capturing.</summary>
+    public bool UploadEnabled { get; set; }
+
+    public string UploadServer { get; set; } = "https://norrathcodex.com";
+
+    /// <summary>The upload token, encrypted for this Windows user (DPAPI) so settings.json never holds it in the clear.</summary>
+    public string UploadTokenProtected { get; set; } = "";
+
+    [JsonIgnore]
+    public string UploadToken
+    {
+        get
+        {
+            if (UploadTokenProtected.Length == 0) return "";
+            try
+            {
+                return Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(UploadTokenProtected), null, DataProtectionScope.CurrentUser));
+            }
+            catch (Exception ex) when (ex is CryptographicException or FormatException)
+            {
+                return "";      // saved by another Windows user or damaged: the token has to be pasted again
+            }
+        }
+        set => UploadTokenProtected = string.IsNullOrWhiteSpace(value) ? ""
+            : Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(value.Trim()), null, DataProtectionScope.CurrentUser));
+    }
 
     private static string FilePath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "EQCollector", "settings.json");
 

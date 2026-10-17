@@ -12,12 +12,15 @@ internal static class Program
 
     /// <summary>
     /// With no arguments the window opens. For scripts and testing:
-    ///   EQCollector.exe --file capture.pcapng [--out folder] [--eq "EverQuest folder"]
-    /// reads a capture file, writes items.jsonl and aa.jsonl, prints a summary and exits.
+    ///   EQCollector.exe --file capture.pcapng [--out folder] [--eq "EverQuest folder"] [--upload]
+    /// reads a capture file, writes items.jsonl and aa.jsonl, prints a summary and exits (with --upload it then sends them
+    /// to the website). EQCollector.exe --upload-folder folder  sends what a folder already holds.
+    /// The website and token come from --server and the EQC_TOKEN environment variable, or from what the window saved.
     /// </summary>
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Contains("--upload-folder")) return RunUploadFolder(args);
         if (args.Contains("--file")) return RunHeadless(args);
 
         ApplicationConfiguration.Initialize();
@@ -29,6 +32,37 @@ internal static class Program
     {
         int i = Array.IndexOf(args, name);
         return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+    }
+
+    private static int RunUploadFolder(string[] args)
+    {
+        AttachConsole(AttachParentProcess);
+        string? folder = Arg(args, "--upload-folder");
+        if (folder == null || !Directory.Exists(folder))
+        {
+            Console.Error.WriteLine("EQCollector --upload-folder <results folder> [--server https://...]   (token: EQC_TOKEN environment variable or saved by the window)");
+            return 2;
+        }
+        return UploadFolder(args, folder);
+    }
+
+    private static int UploadFolder(string[] args, string folder)
+    {
+        var settings = AppSettings.Load();
+        string server = Arg(args, "--server") ?? settings.UploadServer;
+        string token = Environment.GetEnvironmentVariable("EQC_TOKEN") ?? settings.UploadToken;
+        try
+        {
+            using var uploader = new CollectorUploader(server, token, folder, Console.WriteLine);
+            var r = uploader.UploadFolderAsync(folder).GetAwaiter().GetResult();
+            Console.WriteLine($"Uploaded: {r.ItemsChecked:N0} items checked, {r.ItemsAdded:N0} added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved, {r.Rejected:N0} rejected.");
+            return 0;
+        }
+        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException)
+        {
+            Console.Error.WriteLine("EQCollector: " + ex.Message);
+            return 1;
+        }
     }
 
     private static int RunHeadless(string[] args)
@@ -51,7 +85,7 @@ internal static class Program
             var engine = CollectorEngine.ProcessFile(file, outDir, strings, Console.WriteLine, n => Console.Write($"\r{n:N0} packets"));
             Console.WriteLine();
             Console.WriteLine($"{engine.Packets:N0} packets, {engine.ItemCount:N0} items, {engine.AaCount:N0} AA ranks -> {outDir}");
-            return 0;
+            return args.Contains("--upload") ? UploadFolder(args, outDir) : 0;
         }
         catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException)
         {
