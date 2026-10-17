@@ -50,7 +50,8 @@ internal static class Program
     {
         var settings = AppSettings.Load();
         string server = Arg(args, "--server") ?? settings.UploadServer;
-        string token = Environment.GetEnvironmentVariable("EQC_TOKEN") ?? settings.UploadToken;
+        var envToken = Environment.GetEnvironmentVariable("EQC_TOKEN");
+        string token = string.IsNullOrWhiteSpace(envToken) ? settings.UploadToken : envToken;
         try
         {
             using var uploader = new CollectorUploader(server, token, folder, Console.WriteLine);

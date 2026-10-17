@@ -565,7 +565,7 @@ public sealed class MainForm : Form
                 : "Your token sends new items for review; AA ranks are not stored for this kind of token."));
             MessageBox.Show(this, ping.Trusted ? "Connected. Your token adds new items and AA ranks directly." : "Connected. Your token sends new items to the review queue; AA ranks are not stored for this kind of token.", "Website upload", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
-        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException or NotSupportedException or IOException or UnauthorizedAccessException)
         {
             Log("Upload test: " + ex.Message);
             MessageBox.Show(this, ex.Message, "Website upload", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -585,7 +585,7 @@ public sealed class MainForm : Form
             var r = await Task.Run(() => uploader.UploadFolderAsync(folder));
             Log($"Done: {r.ItemsChecked:N0} items checked, {r.ItemsAdded:N0} added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved.");
         }
-        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException or NotSupportedException or IOException or UnauthorizedAccessException)
         {
             Log("Upload: " + ex.Message);
         }

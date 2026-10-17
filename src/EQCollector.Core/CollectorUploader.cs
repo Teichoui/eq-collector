@@ -211,7 +211,7 @@ public sealed class CollectorUploader : IDisposable
             aaSaved += Int(doc, "aa_saved");
             // Ranks the server declined (a non-trusted token) are remembered for this token only, or every round would send
             // them again -- and a trusted token later still sends them.
-            bool declined = Int(doc, "aa_skipped") > 0;
+            bool declined = Int(doc, "aa_saved") == 0 && Int(doc, "aa_skipped") > 0;     // the whole batch refused (a token that may not store AAs)
             foreach (var b in batch)
             {
                 if (declined) _state.Declined[b.Id] = b.Hash;
