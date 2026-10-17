@@ -27,7 +27,7 @@ public sealed class MainForm : Form
     private readonly Button _openOut = new() { Text = "Open output folder", AutoSize = true };
     private readonly CheckBox _saveRaw = new() { Text = "Also save the raw capture (.pcap) while capturing, so problems can be analysed", AutoSize = true, Checked = true };
     private readonly Label _state = new() { AutoSize = true, Text = "Ready." };
-    private readonly Label _stats = new() { AutoSize = true, Font = new Font("Consolas", 10f), Text = "" };
+    private readonly Label _stats = new() { AutoSize = false, Height = 40, Dock = DockStyle.Fill, Font = new Font("Consolas", 10f), Text = "" };   // wraps instead of clipping in a narrow window
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, Font = new Font("Consolas", 9f) };
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 500 };
 
@@ -431,7 +431,7 @@ public sealed class MainForm : Form
         {
             if (_engine != null)
             {
-                _stats.Text = $"Packets {_engine.Packets,10:N0}   Sessions {_engine.Sessions,4:N0}   Game packets {_engine.AppPackets,9:N0}   Items {_engine.ItemCount,7:N0}   AA ranks {_engine.AaCount,5:N0}   AA type {(_engine.AaOpcode is { } op ? "0x" + op.ToString("x") : "not seen")}";
+                _stats.Text = $"Packets {_engine.Packets:N0}  |  Sessions {_engine.Sessions:N0}  |  Game packets {_engine.AppPackets:N0}  |  Items {_engine.ItemCount:N0}  |  AA ranks {_engine.AaCount:N0}  |  AA type {(_engine.AaOpcode is { } op ? "0x" + op.ToString("x") : "not seen")}";
                 if (_capture != null && !_sessionHintShown && _engine.Packets > 0 && _engine.Sessions == 0 && DateTime.Now - _liveStarted > TimeSpan.FromSeconds(30))
                 {
                     _sessionHintShown = true;

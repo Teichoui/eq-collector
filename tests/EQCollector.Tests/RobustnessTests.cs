@@ -404,6 +404,21 @@ public class RobustnessTests
     }
 
     [Fact]
+    public void A_retransmitted_request_does_not_turn_an_established_session_back_into_a_pending_one()
+    {
+        var got = new List<AppPacket>();
+        var reader = new EQStreamReader(got.Add);
+        Connect(reader, 0xC0A80105, 50000);
+
+        // a late duplicate of the client's request (same session id) arrives after the session is up
+        reader.Feed(0xC0A80105, Server, 50000, ServerPort, Concat(Be16(1), new byte[4], Be32(0x01020304), new byte[14]), 3);
+
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, StoredData(1, App(0x1111, new byte[30])), 4);   // still decodes
+        Assert.Equal(0x1111, Assert.Single(got).Opcode);
+        Assert.Equal(1, reader.SessionsSeen);
+    }
+
+    [Fact]
     public void A_pcapng_block_whose_closing_length_disagrees_ends_the_file_there()
     {
         var frame = UdpFrame(20 + 8 + 10, 10);

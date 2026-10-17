@@ -252,7 +252,13 @@ public sealed class EQStreamReader
         {
             case SessionRequest:
                 if (body.Length == 22)
-                    AddClient(srcIp, srcPort, dstIp, 512, (int)Be32(body, 4), Array.Empty<byte>(), ts);
+                {
+                    int requested = (int)Be32(body, 4);
+                    // a retransmitted request for a session that is already established changes nothing
+                    if (_clients.TryGetValue((srcIp, srcPort), out var current) && current.Session == requested && current.ServerIp == dstIp && current.Key.Length > 0)
+                        break;
+                    AddClient(srcIp, srcPort, dstIp, 512, requested, Array.Empty<byte>(), ts);
+                }
                 break;
 
             case SessionResponse:
