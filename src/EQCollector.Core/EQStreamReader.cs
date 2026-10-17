@@ -58,6 +58,7 @@ public sealed class EQStreamReader
         public byte[] Key = Array.Empty<byte>();
         public int MaxLength;
         public double LastSeen;
+        public bool Keyless;                         // joined mid-session: no handshake was seen, so there is no key to check packets with
         public readonly Fragments ToServer = new();
         public readonly Fragments ToClient = new();
     }
@@ -74,6 +75,17 @@ public sealed class EQStreamReader
 
     /// <summary>Called when the callback passed to the constructor throws; the packet is dropped and reading carries on.</summary>
     public Action<Exception>? OnCallbackError { get; set; }
+
+    /// <summary>
+    /// Follow sessions that were already running when the capture began (no handshake, so no checksum key). A packet is taken
+    /// as game traffic when its session opcode is a data/fragment/bundle one, it starts with the compression flag byte, and
+    /// exactly one end is a game server (<see cref="IsServerAddress"/>). Such packets cannot be checksummed, so what they
+    /// carry is only trusted as far as the decoders' own range checks. Off by default; the collector turns it on.
+    /// </summary>
+    public bool AcceptSessionsInProgress { get; set; }
+
+    /// <summary>Which addresses are game servers, for <see cref="AcceptSessionsInProgress"/> (default: 69.174.0.0/16).</summary>
+    public Func<uint, bool> IsServerAddress { get; set; } = ip => (ip >> 16) == 0x45AE;
 
     public EQStreamReader(Action<AppPacket> onPacket) => _onPacket = onPacket;
 
@@ -177,6 +189,7 @@ public sealed class EQStreamReader
     /// </summary>
     private Client? Validate(Client client, int opcode, byte[] body)
     {
+        if (client.Keyless) return client;                    // joined mid-session: there is no key to check against
         if (CrcOk(client, opcode, body)) return client;
         if (_candidates.TryGetValue((client.ClientIp, client.ClientPort), out var staged) && CrcOk(staged, opcode, body))
         {
@@ -243,6 +256,30 @@ public sealed class EQStreamReader
             if (_candidates.TryGetValue((client.ClientIp, client.ClientPort), out var staged)) limit = Math.Max(limit, staged.MaxLength);
             if (buf.Length > limit) return;
             client.LastSeen = ts;
+        }
+
+        // A session already under way when the capture began has no handshake to learn a key from. Its data packets can still be
+        // taken apart (the flag byte, compression and fragment framing need no key), so adopt it without checksums.
+        if (client == null && AcceptSessionsInProgress && !isSub
+            && (opcode == Combined || opcode == Packet || opcode == Fragment)
+            && body.Length > 4 && (body[0] == 0x5A || body[0] == 0xA5))
+        {
+            bool fromServer = IsServerAddress(srcIp);
+            if (fromServer != IsServerAddress(dstIp))           // exactly one end is a game server
+            {
+                uint serverIp = fromServer ? srcIp : dstIp;
+                uint clientIp = fromServer ? dstIp : srcIp;
+                int clientPort = fromServer ? dstPort : srcPort;
+                client = new Client { ClientIp = clientIp, ClientPort = clientPort, ServerIp = serverIp, MaxLength = 65535, Keyless = true, LastSeen = ts };
+                if (!_clients.ContainsKey((clientIp, clientPort)) && _clients.Count >= MaxClients)
+                {
+                    var oldest = _clients.Values.MinBy(c => c.LastSeen)!;
+                    _clients.Remove((oldest.ClientIp, oldest.ClientPort));
+                }
+                _clients[(clientIp, clientPort)] = client;
+                SessionsSeen++;
+                clientToServer = !fromServer;
+            }
         }
 
         // nothing but the handshake means anything until a session has been seen

@@ -403,6 +403,51 @@ public class RobustnessTests
         Assert.Equal(1, reader.SessionsSeen);
     }
 
+    private static byte[] FlaggedPacket(int seq, int appOpcode) =>
+        Concat(Be16(0x09), new byte[] { 0xA5 }, Be16(seq), App(appOpcode, new byte[30]), new byte[] { 0x12, 0x34 });   // no valid checksum: none is known
+
+    [Fact]
+    public void A_session_already_running_when_the_capture_began_is_followed_when_asked_to()
+    {
+        var got = new List<AppPacket>();
+        var reader = new EQStreamReader(got.Add) { AcceptSessionsInProgress = true };
+
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, FlaggedPacket(1, 0x4444), 1);       // from the game server, no handshake seen
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, FlaggedPacket(2, 0x5555), 2);
+
+        Assert.Equal(new[] { 0x4444, 0x5555 }, got.Select(p => (int)p.Opcode).ToArray());
+        Assert.Equal(1, reader.SessionsSeen);
+        Assert.All(got, p => Assert.False(p.ClientToServer));
+    }
+
+    [Fact]
+    public void Sessions_in_progress_are_not_followed_unless_exactly_one_end_is_a_game_server()
+    {
+        var got = new List<AppPacket>();
+        var reader = new EQStreamReader(got.Add) { AcceptSessionsInProgress = true };
+
+        reader.Feed(0xC0A80105, 0xC0A80106, 50000, 9000, FlaggedPacket(1, 0x1111), 1);          // two private addresses
+        reader.Feed(Server, 0x45AE0999, ServerPort, 9000, FlaggedPacket(1, 0x2222), 2);         // two game servers
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, Concat(Be16(0x09), Be16(1), App(0x3333, new byte[30])), 3);   // no flag byte
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, FlaggedPacket(1, 0x4444), 4);         // the only real one
+
+        Assert.Equal(0x4444, Assert.Single(got).Opcode);
+    }
+
+    [Fact]
+    public void A_session_followed_mid_stream_is_upgraded_when_its_handshake_appears()
+    {
+        var got = new List<AppPacket>();
+        var reader = new EQStreamReader(got.Add) { AcceptSessionsInProgress = true };
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, FlaggedPacket(1, 0x4444), 1);       // mid-session, unchecked
+        Connect(reader, 0xC0A80105, 50000);                                                      // the next zone: a real handshake
+
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, FlaggedPacket(2, 0x5555), 3);       // wrong checksum now: rejected
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, StoredData(3, App(0x6666, new byte[30])), 4);
+
+        Assert.Equal(new[] { 0x4444, 0x6666 }, got.Select(p => (int)p.Opcode).ToArray());
+    }
+
     [Fact]
     public void A_retransmitted_request_does_not_turn_an_established_session_back_into_a_pending_one()
     {

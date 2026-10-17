@@ -44,14 +44,14 @@ public sealed class CollectorEngine : IDisposable
     /// <summary>Something went wrong that did not stop the capture (a file could not be written, a handler threw).</summary>
     public event Action<string>? Error;
 
-    public CollectorEngine(string outputFolder, ClientStrings? strings = null, Action<string>? log = null, ushort? aaOpcode = null, bool aaBit64 = true)
+    public CollectorEngine(string outputFolder, ClientStrings? strings = null, Action<string>? log = null, ushort? aaOpcode = null, bool aaBit64 = true, bool sessionsInProgress = true)
     {
         OutputFolder = outputFolder;
         Directory.CreateDirectory(outputFolder);
         _strings = strings ?? ClientStrings.Empty;
         _log = log;
         _aa = new AaFinder(aaOpcode, aaBit64);
-        _reader = new EQStreamReader(OnApp) { OnCallbackError = ex => Report("A handler failed: " + ex.Message) };
+        _reader = new EQStreamReader(OnApp) { OnCallbackError = ex => Report("A handler failed: " + ex.Message), AcceptSessionsInProgress = sessionsInProgress };
         LoadExistingItemIds();
         LoadExistingAa();
     }
@@ -254,7 +254,7 @@ public sealed class CollectorEngine : IDisposable
         bool bit64 = true;
         {
             var finder = new AaFinder();
-            var probe = new EQStreamReader(p => finder.OnPacket(p));
+            var probe = new EQStreamReader(p => finder.OnPacket(p)) { AcceptSessionsInProgress = true };
             foreach (var udp in PcapReader.ReadUdp(capturePath))
             {
                 cancel.ThrowIfCancellationRequested();
