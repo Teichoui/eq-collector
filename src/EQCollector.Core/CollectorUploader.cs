@@ -256,7 +256,7 @@ public sealed class CollectorUploader : IDisposable
         {
             using var response = await SendAsync(() => JsonRequest("api/collector/upload", new Dictionary<string, object?> { ["aa"] = batch.Select(b => b.Record).ToList() }), ct);
             var doc = await ReadJson(response, ct);
-            RequireCounters(doc, "aa_saved", "aa_skipped", "aa_queued");
+            RequireCounters(doc, "aa_saved", "aa_skipped");          // aa_queued is newer: absent from an older website
             aaSent += batch.Length;
             aaSaved += Int(doc, "aa_saved");
             aaQueued += Int(doc, "aa_queued");
@@ -464,10 +464,10 @@ public sealed class CollectorUploader : IDisposable
 
     // ---- helpers ----------------------------------------------------------------------------------------------------
 
-    /// <summary>The website always answers an upload with its counters; a reply without them (a proxy, an old server) is not an acknowledgement.</summary>
+    /// <summary>The website always answers an upload with all of its counters; a reply missing any of them (a proxy, an old server, a half answer) is not an acknowledgement.</summary>
     private static void RequireCounters(JsonElement doc, params string[] names)
     {
-        if (doc.ValueKind != JsonValueKind.Object || !names.Any(n => doc.TryGetProperty(n, out _))) throw Unexpected();
+        if (doc.ValueKind != JsonValueKind.Object || !names.All(n => doc.TryGetProperty(n, out _))) throw Unexpected();
     }
 
     private static bool HasText(IReadOnlyDictionary<string, object?> rank)
