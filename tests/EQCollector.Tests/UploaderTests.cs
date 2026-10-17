@@ -493,7 +493,7 @@ public class UploaderTests
         {
             var partial = Path.Combine(dir, "aa.partial.jsonl");
             var main = Path.Combine(dir, "aa.jsonl");
-            File.WriteAllText(partial, "{\"rank_id\":1,\"aa_id\":1,\"rank\":1,\"title\":\"stale\"}\n");
+            File.WriteAllText(partial, "{\"rank_id\":1,\"aa_id\":1,\"rank\":1,\"title\":\"stale\"}\n{\"rank_id\":9,\"aa_id\":1,\"rank\":2,\"title\":\"only here\"}\n");
             File.SetLastWriteTimeUtc(partial, DateTime.UtcNow.AddDays(-2));
             File.WriteAllText(main, "{\"rank_id\":1,\"aa_id\":1,\"rank\":1,\"title\":\"fresh\"}\n");
             var site = new FakeSite { Answer = (_, json) => FakeSite.Ok($"{{\"aa_saved\":{json.GetProperty("aa").GetArrayLength()},\"aa_skipped\":0}}") };
@@ -501,6 +501,7 @@ public class UploaderTests
             await up.UploadFolderAsync(dir);
             Assert.Contains("fresh", site.Requests.Single().Body);
             Assert.DoesNotContain("stale", site.Requests.Single().Body);
+            Assert.Contains("only here", site.Requests.Single().Body);        // a rank that exists only in the older file is still sent
         }
         finally { Directory.Delete(dir, true); }
     }
@@ -514,6 +515,53 @@ public class UploaderTests
             using var uploader = Make(new FakeSite { Answer = (_, _) => FakeSite.Ok("{}") }, dir);
             using var auto = new AutoUploader(uploader, () => new UploadBatch(new(), null), null, async ct => { await Task.Delay(TimeSpan.FromSeconds(30), ct); }) { Interval = TimeSpan.FromHours(1) };
             Assert.False(await auto.StopAsync(TimeSpan.FromMilliseconds(100)));    // the catch-up did not finish in time
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task A_rejected_item_is_tried_again_when_its_record_changes()
+    {
+        var dir = TempDir();
+        try
+        {
+            bool reject = true;
+            var site = new FakeSite
+            {
+                Answer = (path, _) => path == "/api/collector/check" ? FakeSite.Ok("{\"missing_items\":[5]}")
+                    : reject ? new HttpResponseMessage((HttpStatusCode)422) { Content = new StringContent("{}") } : FakeSite.Ok("{\"items_added\":1}"),
+            };
+            using var up = Make(site, dir);
+            Assert.Equal(1, (await up.UploadAsync(new[] { Item(5, "Broken") }, NoAa)).Rejected);
+            int requests = site.Requests.Count;
+            await up.UploadAsync(new[] { Item(5, "Broken") }, NoAa);          // same record: not tried again
+            Assert.Equal(requests, site.Requests.Count);
+
+            reject = false;
+            var fixedUp = await up.UploadAsync(new[] { Item(5, "Fixed") }, NoAa);   // a corrected record is
+            Assert.Equal(1, fixedUp.ItemsAdded);
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task What_another_process_recorded_is_folded_in_before_sending()
+    {
+        var dir = TempDir();
+        try
+        {
+            var site = new FakeSite { Answer = (path, _) => path == "/api/collector/check" ? FakeSite.Ok("{\"missing_items\":[]}") : FakeSite.Ok("{\"items_added\":0}") };
+            using var up = Make(site, dir);
+            await up.UploadAsync(new[] { Item(1) }, NoAa);                    // creates the state file with item 1
+
+            // another process recorded item 2 in the file
+            var statePath = Path.Combine(dir, "upload-state.json");
+            var json = File.ReadAllText(statePath).Replace("[1]", "[1,2]");
+            File.WriteAllText(statePath, json);
+
+            int before = site.Requests.Count;
+            await up.UploadAsync(new[] { Item(2) }, NoAa);
+            Assert.Equal(before, site.Requests.Count);                        // item 2 was already known: nothing to ask
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
     }

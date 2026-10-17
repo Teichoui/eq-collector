@@ -134,7 +134,14 @@ public sealed class CollectorUploader : IDisposable
         IReadOnlyCollection<IReadOnlyDictionary<string, object?>> aa, CancellationToken ct = default)
     {
         await Gate.WaitAsync(ct);
-        try { return await UploadCoreAsync(items, aa, ct); }
+        try
+        {
+            // Another process (the command line while the window runs) may share the results folder: take its file lock and
+            // fold in what it recorded before deciding what to send.
+            using var fileLock = await AcquireFileLockAsync(ct);
+            _state.MergeFrom(UploadState.Load(_statePath, _server));
+            return await UploadCoreAsync(items, aa, ct);
+        }
         finally { Gate.Release(); }
     }
 
@@ -147,7 +154,11 @@ public sealed class CollectorUploader : IDisposable
         var fresh = new Dictionary<long, IReadOnlyDictionary<string, object?>>();
         foreach (var item in items)
         {
-            if (TryId(item, "id", out long id) && !_state.Items.Contains(id) && !_state.Rejected.Contains(id)) fresh[id] = Strip(item);
+            if (!TryId(item, "id", out long id) || _state.Items.Contains(id)) continue;
+            var stripped = Strip(item);
+            // An item the website rejected is skipped only while its record is unchanged; a corrected record is tried again.
+            if (_state.RejectedHashes.TryGetValue(id, out var rejectedHash) && rejectedHash == Hash(stripped)) continue;
+            fresh[id] = stripped;
         }
         checkedCount = fresh.Count;
 
@@ -162,7 +173,12 @@ public sealed class CollectorUploader : IDisposable
             {
                 var result = await SendItemsAsync(batch.Select(i => fresh[i]).ToList(), ct);
                 sent += result.Sent; added += result.Added; queued += result.Queued; rejected += result.Rejected;
-                foreach (long id in batch) _state.Items.Add(id);     // handled: added, queued, skipped by the server, or rejected locally
+                foreach (long id in batch)
+                {
+                    if (_state.RejectedHashes.TryGetValue(id, out var refusedHash) && refusedHash == Hash(fresh[id])) continue;   // rejected as it is: tried again only if it changes
+                    _state.Items.Add(id);                            // handled: added, queued, or skipped by the server
+                    _state.RejectedHashes.Remove(id);
+                }
                 _state.Save(_statePath);
             }
         }
@@ -209,6 +225,28 @@ public sealed class CollectorUploader : IDisposable
         return summary;
     }
 
+    /// <summary>An exclusive lock file next to the state file, held for one round. Waits for another process; gives up (and goes on without it) after a minute.</summary>
+    private async Task<IDisposable?> AcquireFileLockAsync(CancellationToken ct)
+    {
+        var path = _statePath + ".lock";
+        for (int i = 0; i < 300; i++)
+        {
+            try
+            {
+                return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
+            }
+            catch (IOException)
+            {
+                await Task.Delay(200, ct);                // held by another process
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return null;                              // cannot create a lock file here: carry on without one
+            }
+        }
+        return null;
+    }
+
     /// <summary>Uploads items.jsonl and aa.jsonl from a results folder (what an earlier run saved).</summary>
     public Task<UploadSummary> UploadFolderAsync(string folder, CancellationToken ct = default)
         => UploadAsync(ReadJsonLines(Path.Combine(folder, "items.jsonl")), ReadAaLines(folder), ct);
@@ -217,12 +255,12 @@ public sealed class CollectorUploader : IDisposable
     private static List<IReadOnlyDictionary<string, object?>> ReadAaLines(string folder)
     {
         string main = Path.Combine(folder, "aa.jsonl"), partial = Path.Combine(folder, "aa.partial.jsonl");
-        var list = ReadJsonLines(main);
-        // The fallback file only counts while it is the newer one: once aa.jsonl can be written again it is older, and its
-        // ranks must not override the newer ones.
-        if (File.Exists(partial) && (!File.Exists(main) || File.GetLastWriteTimeUtc(partial) >= File.GetLastWriteTimeUtc(main)))
-            list.AddRange(ReadJsonLines(partial));
-        return list;
+        // Both files count (a rank may exist only in the fallback file); for a rank in both, the newer file wins, because
+        // once aa.jsonl can be written again the old fallback file is the stale one.
+        bool partialNewer = File.Exists(partial) && (!File.Exists(main) || File.GetLastWriteTimeUtc(partial) >= File.GetLastWriteTimeUtc(main));
+        var older = ReadJsonLines(partialNewer ? main : partial);
+        older.AddRange(ReadJsonLines(partialNewer ? partial : main));       // later entries replace earlier ones for the same rank
+        return older;
     }
 
     public static List<IReadOnlyDictionary<string, object?>> ReadJsonLines(string path)
@@ -278,8 +316,8 @@ public sealed class CollectorUploader : IDisposable
             if (batch.Count == 1)
             {
                 TryId(batch[0], "id", out long id);
-                _state.Rejected.Add(id);
-                _log?.Invoke($"The website rejected item {id}; it will not be sent again.");
+                _state.RejectedHashes[id] = Hash(batch[0]);
+                _log?.Invoke($"The website rejected item {id}; it will not be sent again unless its data changes.");
                 return new ItemResult(0, 0, 0, 1);
             }
             int half = batch.Count / 2;
@@ -421,7 +459,7 @@ public sealed class CollectorUploader : IDisposable
     {
         public string Server { get; set; } = "";
         public HashSet<long> Items { get; set; } = new();
-        public HashSet<long> Rejected { get; set; } = new();
+        public Dictionary<long, string> RejectedHashes { get; set; } = new();
         public Dictionary<long, string> Aa { get; set; } = new();
         public Dictionary<long, string> Declined { get; set; } = new();     // AA ranks the server would not store for DeclinedFor's token
         public string DeclinedFor { get; set; } = "";
@@ -443,11 +481,20 @@ public sealed class CollectorUploader : IDisposable
             return new UploadState { Server = server };
         }
 
+        /// <summary>Adds what another process recorded (this process's own entries win where both have one).</summary>
+        public void MergeFrom(UploadState other)
+        {
+            Items.UnionWith(other.Items);
+            foreach (var kv in other.RejectedHashes) RejectedHashes.TryAdd(kv.Key, kv.Value);
+            foreach (var kv in other.Aa) Aa.TryAdd(kv.Key, kv.Value);
+            if (DeclinedFor == other.DeclinedFor) foreach (var kv in other.Declined) Declined.TryAdd(kv.Key, kv.Value);
+        }
+
         public void Save(string path)
         {
             try
             {
-                var temp = path + ".tmp";
+                var temp = path + "." + Environment.ProcessId + ".tmp";
                 File.WriteAllText(temp, JsonSerializer.Serialize(this), new UTF8Encoding(false));
                 File.Move(temp, path, overwrite: true);
             }

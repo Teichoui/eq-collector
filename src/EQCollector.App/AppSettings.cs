@@ -28,7 +28,7 @@ public sealed class AppSettings
     {
         get
         {
-            if (UploadTokenProtected.Length == 0) return "";
+            if (string.IsNullOrEmpty(UploadTokenProtected)) return "";       // null when the file holds "UploadTokenProtected": null
             try
             {
                 return Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(UploadTokenProtected), null, DataProtectionScope.CurrentUser));
@@ -48,7 +48,18 @@ public sealed class AppSettings
     {
         try
         {
-            if (File.Exists(FilePath)) return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath)) ?? new AppSettings();
+            if (File.Exists(FilePath))
+            {
+                var loaded = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath)) ?? new AppSettings();
+                loaded.UploadServer ??= new AppSettings().UploadServer;      // a hand-edited file may hold nulls
+                loaded.UploadTokenProtected ??= "";
+                loaded.OutputFolder ??= new AppSettings().OutputFolder;
+                loaded.EqFolder ??= "";
+                loaded.CaptureFile ??= "";
+                loaded.Adapter ??= "";
+                loaded.Filter ??= new AppSettings().Filter;
+                return loaded;
+            }
         }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
         {
