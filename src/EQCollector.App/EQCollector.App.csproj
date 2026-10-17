@@ -9,7 +9,7 @@
     <AssemblyName>EQCollector</AssemblyName>
     <RootNamespace>EQCollector.App</RootNamespace>
     <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <Product>EQ Collector</Product>
     <Company>Norrath Codex</Company>
   </PropertyGroup>

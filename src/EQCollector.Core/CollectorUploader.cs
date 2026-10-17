@@ -19,7 +19,7 @@ public sealed class UploadUnavailableException : Exception
 }
 
 /// <summary>What one upload round did.</summary>
-public sealed record UploadSummary(int ItemsChecked, int ItemsSent, int ItemsAdded, int ItemsQueued, int AaSent, int AaSaved, int Rejected);
+public sealed record UploadSummary(int ItemsChecked, int ItemsSent, int ItemsAdded, int ItemsQueued, int AaSent, int AaSaved, int Rejected, int ItemsAlreadyOnSite = 0);
 
 /// <summary>What the server said about the token.</summary>
 public sealed record PingResult(bool Ok, bool Trusted, string Site);
@@ -63,7 +63,7 @@ public sealed class CollectorUploader : IDisposable
         if (string.IsNullOrWhiteSpace(token)) throw new ArgumentException("An upload token is needed.", nameof(token));
         _log = log;
         _tokenId = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token.Trim())))[..12];
-        _http = handler != null ? new HttpClient(handler) : new HttpClient();
+        _http = handler != null ? new HttpClient(handler) : new HttpClient(new HttpClientHandler { AutomaticDecompression = DecompressionMethods.All });
         _http.BaseAddress = new Uri(_server + "/");
         _http.Timeout = TimeSpan.FromSeconds(90);
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.Trim());
@@ -72,6 +72,7 @@ public sealed class CollectorUploader : IDisposable
         Directory.CreateDirectory(stateFolder);
         _statePath = Path.Combine(stateFolder, "upload-state.json");
         _statePath = Path.GetFullPath(_statePath);
+        Manifest = SiteManifest.Load(ManifestPath, _server);
         lock (SharedStates)
         {
             if (!SharedStates.TryGetValue(_statePath, out var state) || !string.Equals(state.Server, _server, StringComparison.OrdinalIgnoreCase))
@@ -81,6 +82,16 @@ public sealed class CollectorUploader : IDisposable
     }
 
     public string Server => _server;
+
+    /// <summary>The website's list of what it has, as last pulled (null before the first pull succeeded). Kept in site-manifest.json.</summary>
+    public SiteManifest? Manifest { get; private set; }
+
+    /// <summary>How old the pulled list may get before the next upload round pulls it again.</summary>
+    public TimeSpan ManifestMaxAge { get; set; } = TimeSpan.FromMinutes(30);
+
+    private DateTimeOffset _manifestRetryAfter;       // after a failed pull, not again before this
+
+    private string ManifestPath => Path.Combine(Path.GetDirectoryName(_statePath)!, "site-manifest.json");
 
     /// <summary>Items and AA ranks already confirmed by the server (this app's memory of it).</summary>
     public int KnownItems => _state.Items.Count;
@@ -117,6 +128,34 @@ public sealed class CollectorUploader : IDisposable
             && (b[0] == 10 || (b[0] == 172 && b[1] >= 16 && b[1] <= 31) || (b[0] == 192 && b[1] == 168));
     }
 
+    /// <summary>Pulls the website's list of items and AA ranks and keeps a copy next to the results.</summary>
+    public async Task<SiteManifest> RefreshManifestAsync(CancellationToken ct = default)
+    {
+        using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, "api/collector/manifest"), ct);
+        var doc = await ReadJson(response, ct);
+        var now = DateTimeOffset.UtcNow;
+        var manifest = SiteManifest.Parse(doc, now) ?? throw Unexpected();
+        SiteManifest.Save(ManifestPath, _server, doc, now);
+        Manifest = manifest;
+        _log?.Invoke($"Pulled the website's list: it has {manifest.ItemCount:N0} items and {manifest.AaCount:N0} AA ranks.");
+        return manifest;
+    }
+
+    /// <summary>Pulls the list when there is none or it is older than <see cref="ManifestMaxAge"/>. Trouble reaching the site is not fatal:
+    /// the uploader falls back to asking it, so only a refused token is thrown.</summary>
+    private async Task EnsureManifestAsync(CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (Manifest != null && now - Manifest.FetchedAt < ManifestMaxAge) return;
+        if (now < _manifestRetryAfter) return;
+        try { await RefreshManifestAsync(ct); }
+        catch (UploadUnavailableException ex)
+        {
+            _manifestRetryAfter = now.AddMinutes(5);
+            _log?.Invoke("Could not pull the website's list (" + ex.Message + "); asking the site about each item instead.");
+        }
+    }
+
     /// <summary>Checks the token against the server.</summary>
     public async Task<PingResult> PingAsync(CancellationToken ct = default)
     {
@@ -140,6 +179,7 @@ public sealed class CollectorUploader : IDisposable
             // fold in what it recorded before deciding what to send.
             using var fileLock = await AcquireFileLockAsync(ct);
             _state.MergeFrom(UploadState.Load(_statePath, _server));
+            await EnsureManifestAsync(ct);
             return await UploadCoreAsync(items, aa, ct);
         }
         finally { Gate.Release(); }
@@ -148,13 +188,20 @@ public sealed class CollectorUploader : IDisposable
     private async Task<UploadSummary> UploadCoreAsync(IReadOnlyCollection<IReadOnlyDictionary<string, object?>> items,
         IReadOnlyCollection<IReadOnlyDictionary<string, object?>> aa, CancellationToken ct)
     {
-        int checkedCount = 0, sent = 0, added = 0, queued = 0, aaSent = 0, aaSaved = 0, rejected = 0;
+        int checkedCount = 0, sent = 0, added = 0, queued = 0, aaSent = 0, aaSaved = 0, rejected = 0, onSite = 0;
+        var manifest = Manifest;
 
         // ---- items: ask which ids the site lacks, send only those --------------------------------------------------
         var fresh = new Dictionary<long, IReadOnlyDictionary<string, object?>>();
         foreach (var item in items)
         {
             if (!TryId(item, "id", out long id) || _state.Items.Contains(id)) continue;
+            if (manifest != null && manifest.HasItem(id))
+            {
+                _state.Items.Add(id);                      // the pulled list says the site has it: nothing to ask or send
+                onSite++;
+                continue;
+            }
             var stripped = Strip(item);
             // An item the website rejected is skipped only while its record is unchanged; a corrected record is tried again.
             if (_state.RejectedHashes.TryGetValue(id, out var rejectedHash) && rejectedHash == Hash(stripped)) continue;
@@ -200,6 +247,11 @@ public sealed class CollectorUploader : IDisposable
             string hash = Hash(rank);
             bool already = _state.Aa.TryGetValue(rid, out var known) && known == hash;
             bool declined = _state.Declined.TryGetValue(rid, out var refused) && refused == hash;
+            if (!already && !declined && manifest != null && manifest.TryGetAa(rid, out bool siteHasText) && (siteHasText || !HasText(rank)))
+            {
+                _state.Aa[rid] = hash;                     // the site has this rank (with its text, or we would add none)
+                continue;
+            }
             if (!already && !declined) pending.Add((rid, hash, rank));
         }
         foreach (var batch in pending.Chunk(AaBatch))
@@ -220,7 +272,8 @@ public sealed class CollectorUploader : IDisposable
             _state.Save(_statePath);
         }
 
-        var summary = new UploadSummary(checkedCount, sent, added, queued, aaSent, aaSaved, rejected);
+        _state.Save(_statePath);
+        var summary = new UploadSummary(checkedCount, sent, added, queued, aaSent, aaSaved, rejected, onSite);
         if (sent > 0 || aaSent > 0) _log?.Invoke($"Uploaded: {added} new items added, {queued} items queued for review, {aaSaved} AA ranks saved.");
         return summary;
     }
@@ -409,6 +462,14 @@ public sealed class CollectorUploader : IDisposable
     {
         if (doc.ValueKind != JsonValueKind.Object || !names.Any(n => doc.TryGetProperty(n, out _))) throw Unexpected();
     }
+
+    private static bool HasText(IReadOnlyDictionary<string, object?> rank)
+        => rank.TryGetValue("title", out var v) && v switch
+        {
+            string s => s.Length > 0,
+            JsonElement { ValueKind: JsonValueKind.String } e => (e.GetString() ?? "").Length > 0,
+            _ => false,
+        };
 
     private static UploadUnavailableException Unexpected() => new("The website's answer was not what was expected (is the address right?).");
 

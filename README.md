@@ -27,8 +27,11 @@ never shrinks it).
 
 Optional. Tick *Upload new items and AA ranks to the website while capturing*, enter the website (default
 `https://norrathcodex.com`) and your upload token (the site's *capture-token* page, same token the MacroQuest tools use),
-press *Test*. While you capture, every few seconds the app asks the site which of the items it found the site does not
-have and sends only those, plus the AA ranks.
+press *Test*. The app **pulls the website's list of what it has** (every item id and AA rank, about 90 KB, kept in
+`site-manifest.json` in the results folder and refreshed every 30 minutes) so it knows on this PC what is new. While you
+capture, every few seconds it sends only what that list says the site lacks (it still confirms with the site just before
+sending, in case someone else uploaded it meanwhile). If the list cannot be pulled it asks the site about each item
+instead. AA ranks the site already has, with their text, are not sent.
 
 * A moderator/admin token adds new items and AA ranks directly; any other token puts new items in the site's review
   queue (AA ranks are not stored for those).

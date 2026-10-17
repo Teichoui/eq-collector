@@ -355,7 +355,7 @@ public sealed class MainForm : Form
         {
             using var uploader = new CollectorUploader(server, tokenText, folder, Log);
             var r = uploader.UploadFolderAsync(folder, cancel).GetAwaiter().GetResult();
-            Log($"Uploaded: {r.ItemsAdded:N0} new items added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved.");
+            Log($"Uploaded: {r.ItemsAlreadyOnSite:N0} items were already on the website; {r.ItemsAdded:N0} new items added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved.");
         }
         catch (OperationCanceledException)
         {
@@ -560,9 +560,11 @@ public sealed class MainForm : Form
         try
         {
             var ping = await uploader.PingAsync();
+            var site = await uploader.RefreshManifestAsync();
             Log($"Connected to {ping.Site}. " + (ping.Trusted
                 ? "Your token adds new items and AA ranks directly."
                 : "Your token sends new items for review; AA ranks are not stored for this kind of token."));
+            Log($"The website has {site.ItemCount:N0} items and {site.AaCount:N0} AA ranks; only what is not there will be uploaded.");
             MessageBox.Show(this, ping.Trusted ? "Connected. Your token adds new items and AA ranks directly." : "Connected. Your token sends new items to the review queue; AA ranks are not stored for this kind of token.", "Website upload", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException or NotSupportedException or IOException or UnauthorizedAccessException)
@@ -583,7 +585,7 @@ public sealed class MainForm : Form
         {
             Log($"Uploading what is saved in {folder}...");
             var r = await Task.Run(() => uploader.UploadFolderAsync(folder));
-            Log($"Done: {r.ItemsChecked:N0} items checked, {r.ItemsAdded:N0} added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved.");
+            Log($"Done: {r.ItemsAlreadyOnSite:N0} items already on the website, {r.ItemsChecked:N0} checked as possibly new, {r.ItemsAdded:N0} added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved.");
         }
         catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException or NotSupportedException or IOException or UnauthorizedAccessException)
         {
@@ -621,9 +623,13 @@ public sealed class MainForm : Form
         }
     }
 
-    private string UploadStats() => _autoUploader is { } up
-        ? (up.Active ? $"  |  Uploaded {up.ItemsAdded + up.ItemsQueued:N0} items, {up.AaSaved:N0} AA" : "  |  Upload stopped")
-        : "";
+    private string UploadStats()
+    {
+        if (_autoUploader is not { } up) return "";
+        if (!up.Active) return "  |  Upload stopped";
+        string newToSite = _liveUploader?.Manifest is { } m && _engine != null ? $"New to the site {_engine.Items.Count(i => !m.HasItem(i.Id)):N0}  |  " : "";
+        return $"  |  {newToSite}Uploaded {up.ItemsAdded + up.ItemsQueued:N0} items, {up.AaSaved:N0} AA";
+    }
 
     private void Log(string message)
     {

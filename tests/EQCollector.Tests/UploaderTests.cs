@@ -12,12 +12,19 @@ public class UploaderTests
     private sealed class FakeSite : HttpMessageHandler
     {
         public readonly List<(string Path, string Body, string? Auth)> Requests = new();
+        public readonly List<string> ManifestRequests = new();      // pulls of the site's list, kept apart so other tests count only their own requests
+        public string? ManifestReply;                                // null = the list is not available (404)
         public Func<string, JsonElement, HttpResponseMessage>? Answer;
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             string body = request.Content == null ? "" : await request.Content.ReadAsStringAsync(cancellationToken);
             string path = request.RequestUri!.AbsolutePath;
+            if (path == "/api/collector/manifest")
+            {
+                ManifestRequests.Add(request.Headers.Authorization?.ToString() ?? "");
+                return ManifestReply == null ? new HttpResponseMessage(HttpStatusCode.NotFound) : Ok(ManifestReply);
+            }
             Requests.Add((path, body, request.Headers.Authorization?.ToString()));
             var json = body.Length == 0 ? JsonDocument.Parse("{}").RootElement : JsonDocument.Parse(body).RootElement;
             return Answer!(path, json);
@@ -562,6 +569,104 @@ public class UploaderTests
             int before = site.Requests.Count;
             await up.UploadAsync(new[] { Item(2) }, NoAa);
             Assert.Equal(before, site.Requests.Count);                        // item 2 was already known: nothing to ask
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    private const string Manifest = "{\"generated_at\":\"x\",\"item_count\":9,\"item_ranges\":\"1-5,7,10-12\",\"aa\":[[100,1],[101,0]]}";
+
+    [Fact]
+    public void The_site_list_answers_which_ids_it_has()
+    {
+        var m = SiteManifest.Parse(JsonDocument.Parse(Manifest).RootElement, DateTimeOffset.UtcNow)!;
+        foreach (long id in new long[] { 1, 3, 5, 7, 10, 12 }) Assert.True(m.HasItem(id), id.ToString());
+        foreach (long id in new long[] { 0, 6, 8, 9, 13, 5000 }) Assert.False(m.HasItem(id), id.ToString());
+        Assert.True(m.TryGetAa(100, out bool text) && text);
+        Assert.True(m.TryGetAa(101, out text) && !text);
+        Assert.False(m.TryGetAa(102, out _));
+        foreach (var bad in new[] { "[]", "{}", "{\"item_ranges\":\"5-3\",\"aa\":[]}", "{\"item_ranges\":\"a\",\"aa\":[]}", "{\"item_ranges\":\"1\",\"aa\":[[1]]}" })
+            Assert.Null(SiteManifest.Parse(JsonDocument.Parse(bad).RootElement, DateTimeOffset.UtcNow));
+    }
+
+    [Fact]
+    public async Task Items_the_pulled_list_says_the_site_has_are_never_asked_about_or_sent()
+    {
+        var dir = TempDir();
+        try
+        {
+            var site = new FakeSite
+            {
+                ManifestReply = Manifest,
+                Answer = (path, json) => path switch
+                {
+                    "/api/collector/check" => FakeSite.Ok("{\"missing_items\":[50]}"),
+                    _ => FakeSite.Ok("{\"items_added\":1,\"items_queued\":0,\"items_skipped\":0}"),
+                },
+            };
+            using var up = Make(site, dir);
+            var r = await up.UploadAsync(new[] { Item(1), Item(7), Item(11), Item(50) }, NoAa);
+            Assert.Equal(3, r.ItemsAlreadyOnSite);                        // decided on this PC
+            Assert.Equal(1, r.ItemsChecked);                              // only the unknown one is checked with the site
+            Assert.Equal(1, r.ItemsAdded);
+            var check = site.Requests.Single(x => x.Path == "/api/collector/check");
+            Assert.Contains("50", check.Body);
+            Assert.DoesNotContain("\"item_ids\":[1", check.Body);
+            Assert.True(File.Exists(Path.Combine(dir, "site-manifest.json")));   // the copy kept on this PC
+
+            // a new run uses the saved copy without pulling again
+            CollectorUploader.ForgetSharedStates();
+            Assert.Single(site.ManifestRequests);
+            using var again = Make(site, dir);
+            Assert.NotNull(again.Manifest);
+            await again.UploadAsync(new[] { Item(2) }, NoAa);
+            Assert.Single(site.ManifestRequests);                         // the saved copy was fresh enough: no second pull
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task Without_a_list_the_uploader_falls_back_to_asking_the_site()
+    {
+        var dir = TempDir();
+        try
+        {
+            var site = new FakeSite
+            {
+                Answer = (path, _) => path == "/api/collector/check" ? FakeSite.Ok("{\"missing_items\":[]}") : FakeSite.Ok("{}"),
+            };                                                            // ManifestReply left null: the list is not available
+            using var up = Make(site, dir);
+            var r = await up.UploadAsync(new[] { Item(1) }, NoAa);
+            Assert.Equal(1, r.ItemsChecked);                              // asked about it instead
+            Assert.Equal(0, r.ItemsAlreadyOnSite);
+            await up.UploadAsync(new[] { Item(2) }, NoAa);
+            Assert.Single(site.ManifestRequests);                         // and did not hammer the list endpoint every round
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task AA_ranks_the_site_has_are_not_sent_but_text_it_lacks_is()
+    {
+        var dir = TempDir();
+        try
+        {
+            var site = new FakeSite
+            {
+                ManifestReply = Manifest,
+                Answer = (_, json) => FakeSite.Ok($"{{\"aa_saved\":{json.GetProperty("aa").GetArrayLength()},\"aa_skipped\":0}}"),
+            };
+            using var up = Make(site, dir);
+            // 100: site has it with text; 101: site has it without text and we have text; 102: the site lacks it
+            var r = await up.UploadAsync(new List<IReadOnlyDictionary<string, object?>>(), new[] { Aa(100), Aa(101), Aa(102) });
+            Assert.Equal(2, r.AaSent);
+            var body = site.Requests.Single(x => x.Path == "/api/collector/upload").Body;
+            Assert.Contains("\"rank_id\":101", body);
+            Assert.Contains("\"rank_id\":102", body);
+            Assert.DoesNotContain("\"rank_id\":100", body);
+
+            // and a rank the site has without text, when we have no text either, adds nothing
+            var r2 = await up.UploadAsync(new List<IReadOnlyDictionary<string, object?>>(), new[] { new Dictionary<string, object?> { ["rank_id"] = 101L, ["aa_id"] = 7, ["rank"] = 1 } });
+            Assert.Equal(0, r2.AaSent);
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
     }
