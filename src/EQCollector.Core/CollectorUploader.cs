@@ -278,11 +278,19 @@ public sealed class CollectorUploader : IDisposable
         return summary;
     }
 
-    /// <summary>An exclusive lock file next to the state file, held for one round. Waits for another process; gives up (and goes on without it) after a minute.</summary>
+    /// <summary>How long to wait for another EQ Collector process that is uploading from the same results folder.</summary>
+    public TimeSpan LockWait { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// An exclusive lock file next to the state file, held for one round. Waits for another process; if it stays busy the round
+    /// is not run at all (reported as unavailable, so it is retried) -- going on without the lock could lose the other
+    /// process's record of what it sent.
+    /// </summary>
     private async Task<IDisposable?> AcquireFileLockAsync(CancellationToken ct)
     {
         var path = _statePath + ".lock";
-        for (int i = 0; i < 300; i++)
+        var until = DateTime.UtcNow + LockWait;
+        while (true)
         {
             try
             {
@@ -290,14 +298,14 @@ public sealed class CollectorUploader : IDisposable
             }
             catch (IOException)
             {
-                await Task.Delay(200, ct);                // held by another process
+                if (DateTime.UtcNow >= until) throw new UploadUnavailableException("Another EQ Collector is uploading from this results folder; this will be tried again shortly.");
+                await Task.Delay(100, ct);                // held by another process
             }
             catch (UnauthorizedAccessException)
             {
                 return null;                              // cannot create a lock file here: carry on without one
             }
         }
-        return null;
     }
 
     /// <summary>Uploads items.jsonl and aa.jsonl from a results folder (what an earlier run saved).</summary>

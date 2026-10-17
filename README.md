@@ -29,14 +29,15 @@ Optional. Tick *Upload new items and AA ranks to the website while capturing*, e
 `https://norrathcodex.com`) and your upload token (the site's *capture-token* page, same token the MacroQuest tools use),
 press *Test*. The app **pulls the website's list of what it has** (every item id and AA rank, about 90 KB, kept in
 `site-manifest.json` in the results folder and refreshed every 30 minutes) so it knows on this PC what is new. While you
-capture, every few seconds it sends only what that list says the site lacks (it still confirms with the site just before
+capture, about every 20 seconds (longer while the site is unreachable) it sends only what that list says the site lacks (it still confirms with the site just before
 sending, in case someone else uploaded it meanwhile). If the list cannot be pulled it asks the site about each item
 instead. AA ranks the site already has, with their text, are not sent.
 
 * A moderator/admin token adds new items and AA ranks directly; any other token puts new items in the site's review
   queue (AA ranks are not stored for those).
 * Nothing existing is changed: items the site already has are skipped.
-* What was sent is remembered in `upload-state.json` in the results folder, so nothing is sent twice. If the website
+* What was sent is remembered in `upload-state.json` in the results folder, so nothing is sent twice (to send everything
+  again, e.g. after the website was restored from a backup, delete that file). If the website
   or your connection is down, items stay queued and are retried with a growing pause; a refused token stops the upload
   with one message. Capturing is never affected.
 * The token is stored encrypted for your Windows user (DPAPI) and sent only over https (only localhost or a numeric private-network

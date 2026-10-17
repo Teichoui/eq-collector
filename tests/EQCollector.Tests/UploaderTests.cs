@@ -671,6 +671,26 @@ public class UploaderTests
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
     }
 
+    [Fact]
+    public async Task A_busy_results_folder_delays_the_upload_instead_of_risking_the_other_uploads_memory()
+    {
+        var dir = TempDir();
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var site = new FakeSite { Answer = (_, _) => FakeSite.Ok("{\"missing_items\":[]}") };
+            using var up = Make(site, dir);
+            up.LockWait = TimeSpan.FromMilliseconds(300);
+            using (new FileStream(Path.Combine(dir, "upload-state.json.lock"), FileMode.Create, FileAccess.ReadWrite, FileShare.None))   // another process holds it
+            {
+                await Assert.ThrowsAsync<UploadUnavailableException>(() => up.UploadAsync(new[] { Item(1) }, NoAa));
+            }
+            Assert.Empty(site.Requests);                                  // nothing was sent without the lock
+            Assert.Equal(1, (await up.UploadAsync(new[] { Item(1) }, NoAa)).ItemsChecked);     // and it works once the other process is done
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
     private static async Task WaitFor(Func<bool> condition, int seconds = 5)
     {
         var until = DateTime.UtcNow.AddSeconds(seconds);
