@@ -51,6 +51,25 @@ public class RealCaptureTests
     }
 
     [Fact]
+    public void Live_autosave_writes_every_AA_rank_without_a_stop()
+    {
+        if (Environment.GetEnvironmentVariable("EQC_FULL") != "1") { _out.WriteLine("set EQC_FULL=1 to run, skipped"); return; }
+        if (string.IsNullOrEmpty(Capture) || !File.Exists(Capture)) { _out.WriteLine("set EQC_CAPTURE to a capture file to run this, skipped"); return; }
+
+        var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using var engine = new CollectorEngine(dir) { AutoSaveAa = true, AutoSaveInterval = TimeSpan.Zero };
+            foreach (var udp in PcapReader.ReadUdp(Capture)) engine.Feed(udp);
+            engine.MaybeAutoSaveAa();                               // what the window's timer does; no FlushAa, no Close
+
+            Assert.True(engine.AaCount > 0);
+            Assert.Equal(engine.AaCount, File.ReadAllLines(Path.Combine(dir, "aa.jsonl")).Length);
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void The_whole_capture_gives_the_AA_table()
     {
         if (Environment.GetEnvironmentVariable("EQC_FULL") != "1") { _out.WriteLine("set EQC_FULL=1 to run, skipped"); return; }

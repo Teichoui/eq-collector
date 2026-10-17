@@ -78,7 +78,7 @@ public sealed class MainForm : Form
 
         layout.Controls.Add(Row(_start, _stop, _saveAa, _openOut, _state), 0, 2);
         layout.Controls.Add(_stats, 0, 3);
-        layout.Controls.Add(new Label { Text = "Items and AAs are saved as they are found. Nothing is sent anywhere -- the files stay on this computer.", AutoSize = true, ForeColor = SystemColors.GrayText, Margin = new Padding(3, 6, 3, 6) }, 0, 4);
+        layout.Controls.Add(new Label { Text = "Items are saved as they are found and AAs every few seconds while they arrive. Nothing is sent anywhere -- the files stay on this computer.", AutoSize = true, ForeColor = SystemColors.GrayText, Margin = new Padding(3, 6, 3, 6) }, 0, 4);
         layout.Controls.Add(_log, 0, 5);
         Controls.Add(layout);
 
@@ -237,6 +237,7 @@ public sealed class MainForm : Form
         try
         {
             var engine = NewEngine();
+            engine.AutoSaveAa = true;       // live: write aa.jsonl as ranks arrive, not only on Stop
             lock (_engineLock) { _engine = engine; _engineClosed = false; }
             _capture = new LiveCapture(adapter.Device, _settings.Filter, udp => { lock (_engineLock) _engine?.Feed(udp); });
             _capture.Failed += ex => Log("Capture error: " + ex.Message);
@@ -431,6 +432,7 @@ public sealed class MainForm : Form
         {
             if (_engine != null)
             {
+                if (_capture != null && !_engineClosed) _engine.MaybeAutoSaveAa();     // ranks that arrived at the end of a burst
                 _stats.Text = $"Packets {_engine.Packets:N0}  |  Sessions {_engine.Sessions:N0}  |  Game packets {_engine.AppPackets:N0}  |  Items {_engine.ItemCount:N0}  |  AA ranks {_engine.AaCount:N0}  |  AA type {(_engine.AaOpcode is { } op ? "0x" + op.ToString("x") : "not seen")}";
                 if (_capture != null && !_sessionHintShown && _engine.Packets > 0 && _engine.Sessions == 0 && DateTime.Now - _liveStarted > TimeSpan.FromSeconds(30))
                 {

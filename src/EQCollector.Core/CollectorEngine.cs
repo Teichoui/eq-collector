@@ -9,7 +9,9 @@ namespace EQCollector.Core;
 ///                from an earlier run are not written again;
 ///   aa.jsonl     one line per AA rank, with title, description and spell name when the client's files are loaded.
 ///                <see cref="FlushAa"/> merges this run's ranks into what the file already holds (the newer capture
-///                wins for a rank both have), so a short or aborted run never shrinks a complete table.
+///                wins for a rank both have), so a short or aborted run never shrinks a complete table. With
+///                <see cref="AutoSaveAa"/> on (live capture) it runs by itself while ranks arrive, at most once per
+///                <see cref="AutoSaveInterval"/>, because the whole file is rewritten each time.
 /// Works the same for a capture file and for live traffic. A problem writing to the output folder is reported through
 /// <see cref="Error"/> and stops the writing, but never throws into the capture.
 /// </summary>
@@ -27,6 +29,9 @@ public sealed class CollectorEngine : IDisposable
     private bool _aaLoadFailed;                    // aa.jsonl could not be read completely: it must not be replaced
     private StreamWriter? _itemsFile;
     private bool _writingFailed;
+    private bool _aaDirty;                         // ranks found since the file was last written
+    private long _aaNextAutoSave;                  // Now() before which no automatic write is tried; 0 = no limit yet
+    internal Func<long> Now = () => System.Diagnostics.Stopwatch.GetTimestamp();
 
     public string OutputFolder { get; }
     public long Packets { get; private set; }
@@ -36,6 +41,15 @@ public sealed class CollectorEngine : IDisposable
     public int AaCount => _aa.Count;
     public ushort? AaOpcode => _aa.Opcode;
     public bool AaBit64 => _aa.Bit64;
+
+    /// <summary>Write aa.jsonl while ranks arrive (used for live capture); a file run writes it once at the end.</summary>
+    public bool AutoSaveAa { get; set; }
+
+    /// <summary>The shortest time between two automatic writes of aa.jsonl.</summary>
+    public TimeSpan AutoSaveInterval { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>How long to wait before trying again after an automatic write failed.</summary>
+    public TimeSpan AutoSaveRetry { get; set; } = TimeSpan.FromSeconds(30);
     public IReadOnlyCollection<ItemRecord> Items => _items.Values;
 
     public event Action<ItemRecord>? ItemFound;
@@ -147,9 +161,31 @@ public sealed class CollectorEngine : IDisposable
         }
 
         bool hadOpcode = _aa.Opcode != null;
+        int before = _aa.Count;
         var rank = _aa.OnPacket(p);
+        if (_aa.Count != before) _aaDirty = true;     // the packets buffered while the AA opcode was unknown decode without returning a rank
         if (!hadOpcode && _aa.Opcode != null) _log?.Invoke($"AA packets found (application opcode 0x{_aa.Opcode:x})");
-        if (rank != null) AaFound?.Invoke(rank);
+        if (rank != null)
+        {
+            _aaDirty = true;
+            AaFound?.Invoke(rank);
+        }
+        MaybeAutoSaveAa();
+    }
+
+    internal void MarkAaChanged() => _aaDirty = true;
+
+    /// <summary>Saves aa.jsonl when ranks have arrived since the last write and the interval has passed. Called for every
+    /// packet and by the caller's own timer (so the end of a burst is written even when the game goes quiet); the caller
+    /// must not call it while a packet is being fed.</summary>
+    public void MaybeAutoSaveAa()
+    {
+        if (!AutoSaveAa || !_aaDirty) return;
+        long now = Now();
+        if (now < _aaNextAutoSave) return;
+        // A failed write (FlushAa reported why) is retried after AutoSaveRetry, not on every packet: a file that is briefly
+        // locked recovers, and a permanent problem is not logged hundreds of times.
+        if (FlushAa() == 0) _aaNextAutoSave = now + (long)(AutoSaveRetry.TotalSeconds * System.Diagnostics.Stopwatch.Frequency);
     }
 
     private void AppendItem(ItemRecord item)
@@ -219,6 +255,8 @@ public sealed class CollectorEngine : IDisposable
             }
             File.Move(temp, path, overwrite: true);
             foreach (var (key, line) in merged) _aaOnDisk[key] = line;
+            _aaDirty = false;
+            _aaNextAutoSave = Now() + (long)(AutoSaveInterval.TotalSeconds * System.Diagnostics.Stopwatch.Frequency);
             return merged.Count;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

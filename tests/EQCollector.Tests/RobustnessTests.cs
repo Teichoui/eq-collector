@@ -587,6 +587,80 @@ public class RobustnessTests
     }
 
     [Fact]
+    public void Live_AA_saving_writes_when_ranks_arrive_but_not_more_than_once_per_interval()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "aa.jsonl");
+        File.WriteAllText(path, "{\"aa_id\":1,\"rank\":1,\"title\":\"A1\"}\n");
+        try
+        {
+            long ticks = 1000;
+            using var engine = new CollectorEngine(dir) { AutoSaveAa = true, AutoSaveInterval = TimeSpan.FromSeconds(2), Now = () => ticks };
+
+            File.Delete(path);
+            engine.MaybeAutoSaveAa();
+            Assert.False(File.Exists(path));                          // nothing arrived, so nothing is written
+
+            engine.MarkAaChanged();
+            engine.MaybeAutoSaveAa();
+            Assert.True(File.Exists(path));                           // the first write is immediate
+
+            File.Delete(path);
+            engine.MarkAaChanged();
+            ticks += System.Diagnostics.Stopwatch.Frequency;           // one second later
+            engine.MaybeAutoSaveAa();
+            Assert.False(File.Exists(path));                          // too soon
+
+            ticks += 2 * System.Diagnostics.Stopwatch.Frequency;       // past the interval
+            engine.MaybeAutoSaveAa();
+            Assert.True(File.Exists(path));
+
+            File.Delete(path);
+            engine.AutoSaveAa = false;                                // a file run does not save as it goes
+            engine.MarkAaChanged();
+            ticks += 10 * System.Diagnostics.Stopwatch.Frequency;
+            engine.MaybeAutoSaveAa();
+            Assert.False(File.Exists(path));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void A_failed_live_AA_save_is_retried_later_instead_of_giving_up()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "aa.jsonl");
+        File.WriteAllText(path, "{\"aa_id\":1,\"rank\":1,\"title\":\"A1\"}\n");
+        try
+        {
+            long ticks = 1000;
+            var errors = new List<string>();
+            using var engine = new CollectorEngine(dir) { AutoSaveAa = true, Now = () => ticks };
+            engine.Error += errors.Add;
+
+            File.Delete(path);
+            Directory.CreateDirectory(path + ".tmp");                 // the temporary file cannot be created
+            engine.MarkAaChanged();
+            engine.MaybeAutoSaveAa();
+            Assert.Single(errors);
+            Assert.False(File.Exists(path));
+
+            Directory.Delete(path + ".tmp");                          // the problem goes away
+            ticks += System.Diagnostics.Stopwatch.Frequency * 5;       // too soon to retry: not tried, not logged again
+            engine.MaybeAutoSaveAa();
+            Assert.Single(errors);
+            Assert.False(File.Exists(path));
+
+            ticks += System.Diagnostics.Stopwatch.Frequency * 60;      // past the retry delay
+            engine.MaybeAutoSaveAa();
+            Assert.True(File.Exists(path));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void Flushing_with_no_AAs_anywhere_creates_no_file()
     {
         var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));

@@ -18,8 +18,9 @@ Results are written as JSON lines in a folder on your computer. Nothing is sent 
 * **From a script** -- `EQCollector.exe --file capture.pcapng --out folder --eq "C:\path\to\EverQuest"`
 
 Output (in the chosen folder): `items.jsonl` (one distinct item per line, written as found) and `aa.jsonl` (one AA
-rank per line; written when you stop, press *Save AAs now*, or the file finishes, and merged into what the file already
-holds so a short run never shrinks it).
+rank per line; in live capture it is rewritten every couple of seconds while ranks arrive, and also when you stop or press
+*Save AAs now*; a capture file writes it when it finishes. It is merged into what the file already holds, so a short run
+never shrinks it).
 
 ## Build
 

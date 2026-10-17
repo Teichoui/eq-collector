@@ -12,6 +12,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="EQCollector.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <EmbeddedResource Include="item_columns.txt" LogicalName="item_columns.txt" />
   </ItemGroup>
 
