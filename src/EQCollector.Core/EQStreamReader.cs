@@ -65,6 +65,10 @@ public sealed class EQStreamReader
     private readonly Action<AppPacket> _onPacket;
     private readonly Dictionary<(uint Ip, int Port), Client> _clients = new();
 
+    // A response for another session than the one an endpoint already has: it may be a stray or delayed packet, or the start
+    // of a new session whose request was never captured. It is only kept here until a packet checksums under its key.
+    private readonly Dictionary<(uint Ip, int Port), Client> _candidates = new();
+
     /// <summary>How many game sessions have been set up since the reader was created (a new zone is a new session).</summary>
     public int SessionsSeen { get; private set; }
 
@@ -155,12 +159,43 @@ public sealed class EQStreamReader
     private void AddClient(uint clientIp, int clientPort, uint serverIp, int maxLength, int session, byte[] key, double ts)
     {
         if (key.Length > 0) SessionsSeen++;                  // a request has no key yet; count a session when its response gives one
+        _candidates.Remove((clientIp, clientPort));          // an announced session supersedes anything staged
         if (!_clients.ContainsKey((clientIp, clientPort)) && _clients.Count >= MaxClients)
         {
             var oldest = _clients.Values.MinBy(c => c.LastSeen)!;
             _clients.Remove((oldest.ClientIp, oldest.ClientPort));
         }
         _clients[(clientIp, clientPort)] = new Client
+        {
+            ClientIp = clientIp, ClientPort = clientPort, ServerIp = serverIp, MaxLength = maxLength, Session = session, Key = key, LastSeen = ts,
+        };
+    }
+
+    /// <summary>
+    /// The session whose key the packet's checksum fits: the endpoint's session, or -- when that fails -- the staged
+    /// candidate, which then takes over (a new session that began without a captured request). Null when neither fits.
+    /// </summary>
+    private Client? Validate(Client client, int opcode, byte[] body)
+    {
+        if (CrcOk(client, opcode, body)) return client;
+        if (_candidates.TryGetValue((client.ClientIp, client.ClientPort), out var staged) && CrcOk(staged, opcode, body))
+        {
+            _candidates.Remove((staged.ClientIp, staged.ClientPort));
+            _clients[(staged.ClientIp, staged.ClientPort)] = staged;
+            SessionsSeen++;
+            return staged;
+        }
+        return null;
+    }
+
+    private void Stage(uint clientIp, int clientPort, uint serverIp, int maxLength, int session, byte[] key, double ts)
+    {
+        if (!_candidates.ContainsKey((clientIp, clientPort)) && _candidates.Count >= MaxClients)
+        {
+            var oldest = _candidates.Values.MinBy(c => c.LastSeen)!;
+            _candidates.Remove((oldest.ClientIp, oldest.ClientPort));
+        }
+        _candidates[(clientIp, clientPort)] = new Client
         {
             ClientIp = clientIp, ClientPort = clientPort, ServerIp = serverIp, MaxLength = maxLength, Session = session, Key = key, LastSeen = ts,
         };
@@ -179,6 +214,18 @@ public sealed class EQStreamReader
             toServer = true;
             return c;
         }
+        // Neither matches the established session: the packet may belong to a staged candidate (a new session whose server
+        // differs). Hand back the endpoint's established client so Validate can try both keys.
+        if (_candidates.TryGetValue((dstIp, dstPort), out var staged) && staged.ServerIp == srcIp && _clients.TryGetValue((dstIp, dstPort), out c))
+        {
+            toServer = false;
+            return c;
+        }
+        if (_candidates.TryGetValue((srcIp, srcPort), out staged) && staged.ServerIp == dstIp && _clients.TryGetValue((srcIp, srcPort), out c))
+        {
+            toServer = true;
+            return c;
+        }
         toServer = false;
         return null;
     }
@@ -192,7 +239,9 @@ public sealed class EQStreamReader
         var client = FindClient(srcIp, srcPort, dstIp, dstPort, out bool clientToServer);
         if (client != null)
         {
-            if (buf.Length > client.MaxLength) return;
+            int limit = client.MaxLength;
+            if (_candidates.TryGetValue((client.ClientIp, client.ClientPort), out var staged)) limit = Math.Max(limit, staged.MaxLength);
+            if (buf.Length > limit) return;
             client.LastSeen = ts;
         }
 
@@ -214,10 +263,18 @@ public sealed class EQStreamReader
                     int maxLength = (int)Be32(body, 11);
                     if (_clients.TryGetValue((dstIp, dstPort), out var existing))
                     {
-                        // A response only counts for the session it answers (the pending request, or the established session
-                        // again). A stray or delayed one must not replace a session that is working.
+                        // A response for the session this endpoint already has (the pending request, or the established session
+                        // again) completes it. One for any other session is only staged: a stray or delayed response must not
+                        // replace a session that is working, but a real new session (its request not captured, the old one
+                        // never seen to disconnect) takes over as soon as a packet checksums under its key.
                         if (existing.ServerIp == srcIp && existing.Session == session)
-                            AddClient(dstIp, dstPort, srcIp, maxLength, session, key, ts);
+                        {
+                            if (existing.Key.Length == 0) AddClient(dstIp, dstPort, srcIp, maxLength, session, key, ts);   // completes a request
+                            // else: a retransmitted response for the session already established -- nothing to do (replacing it
+                            // would drop half-assembled packets and count the session twice)
+                        }
+                        else
+                            Stage(dstIp, dstPort, srcIp, maxLength, session, key, ts);
                     }
                     else
                     {
@@ -230,11 +287,15 @@ public sealed class EQStreamReader
                 break;
 
             case Disconnect:
-                if (body.Length == 9 && client != null) _clients.Remove((client.ClientIp, client.ClientPort));
+                if (body.Length == 9 && client != null)
+                {
+                    _clients.Remove((client.ClientIp, client.ClientPort));
+                    _candidates.Remove((client.ClientIp, client.ClientPort));
+                }
                 break;
 
             case Combined:
-                if (client != null && CrcOk(client, opcode, body))
+                if (client != null && (client = Validate(client, opcode, body)) != null)
                 {
                     var data = Uncompress(opcode, body, false);
                     int pos = 0;
@@ -249,7 +310,7 @@ public sealed class EQStreamReader
                 break;
 
             case Packet:
-                if (client != null && (isSub || CrcOk(client, opcode, body)))
+                if (client != null && (isSub || (client = Validate(client, opcode, body)) != null))
                 {
                     var data = Uncompress(opcode, body, isSub);
                     AppPackets(Slice(data, 2), ts, clientToServer, client.ClientPort);   // drop the sequence number
@@ -257,7 +318,7 @@ public sealed class EQStreamReader
                 break;
 
             case Fragment:
-                if (client != null && (isSub || CrcOk(client, opcode, body)))
+                if (client != null && (isSub || (client = Validate(client, opcode, body)) != null))
                 {
                     var part = Uncompress(opcode, body, isSub);
                     var fragments = clientToServer ? client.ToServer : client.ToClient;
@@ -303,11 +364,11 @@ public sealed class EQStreamReader
             run.Add((key, piece.Part));
             total += piece.Part.Length;
 
-            // Past the declared size: the fragments so far are a message whose end was lost, and this one starts the next.
-            // Drop the stale ones and carry on from this fragment.
+            // Past the declared size: either the fragments so far were a message whose end never came and this one starts the
+            // next, or the "size" was only the first bytes of a fragment whose real first fragment has not arrived yet. Nothing
+            // is thrown away: try a run that starts at this fragment and leave the older ones to complete or time out.
             if (size >= 0 && total > size + 4)
             {
-                for (int i = 0; i < run.Count - 1; i++) Remove(f, run[i].Key);
                 run = new List<(ushort Key, byte[] Part)> { (key, piece.Part) };
                 total = piece.Part.Length;
                 size = -1;

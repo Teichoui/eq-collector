@@ -16,16 +16,24 @@ public sealed class PcapWriter : IDisposable
     public PcapWriter(string path, int linkType)
     {
         Path = path;
-        _stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);
-        _writer = new BinaryWriter(_stream);
-        _writer.Write(0xA1B2C3D4u);        // magic: microsecond timestamps
-        _writer.Write((ushort)2);          // version 2.4
-        _writer.Write((ushort)4);
-        _writer.Write(0);                  // time zone
-        _writer.Write(0u);                 // timestamp accuracy
-        _writer.Write(65535u);             // snap length
-        _writer.Write((uint)linkType);
-        _writer.Flush();
+        _stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);   // never truncates an earlier capture
+        try
+        {
+            _writer = new BinaryWriter(_stream);
+            _writer.Write(0xA1B2C3D4u);        // magic: microsecond timestamps
+            _writer.Write((ushort)2);          // version 2.4
+            _writer.Write((ushort)4);
+            _writer.Write(0);                  // time zone
+            _writer.Write(0u);                 // timestamp accuracy
+            _writer.Write(65535u);             // snap length
+            _writer.Write((uint)linkType);
+            _writer.Flush();
+        }
+        catch
+        {
+            _stream.Dispose();                 // a failed header must not leave the file open
+            throw;
+        }
     }
 
     /// <summary>Appends one frame. Safe to call from the capture thread; not for several threads at once.</summary>
@@ -47,8 +55,14 @@ public sealed class PcapWriter : IDisposable
 
     public void Dispose()
     {
-        _writer.Flush();
-        _writer.Dispose();
-        _stream.Dispose();
+        try
+        {
+            _writer.Flush();
+        }
+        finally
+        {
+            _writer.Dispose();                 // closed even when the flush failed (disk full, device gone)
+            _stream.Dispose();
+        }
     }
 }

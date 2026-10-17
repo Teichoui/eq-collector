@@ -44,6 +44,7 @@ internal static class Program
         string outDir = Arg(args, "--out") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "EQCollector");
         string? eq = Arg(args, "--eq") ?? AppSettings.FindEqFolder();
         var strings = !string.IsNullOrEmpty(eq) && Directory.Exists(eq) ? ClientStrings.LoadFolder(eq) : ClientStrings.Empty;
+        foreach (var error in strings.LoadErrors) Console.Error.WriteLine("EQCollector: could not read a client file, carrying on without it -- " + error);
 
         try
         {

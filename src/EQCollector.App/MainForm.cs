@@ -39,6 +39,8 @@ public sealed class MainForm : Form
     private volatile bool _fileRunning;
     private PcapWriter? _raw;                   // the raw traffic of the live session (when the box is ticked)
     private readonly object _rawLock = new();
+    private string _rawFolder = "";                 // read on the UI thread when capture starts; the capture thread never touches a control
+    private volatile bool _rawFailed;               // a write failed: stop trying (one log line, not one per packet)
     private DateTime _liveStarted;
     private bool _sessionHintShown;
     private bool _engineClosed;                 // the engine has been flushed and closed: Stop must not do it again
@@ -149,7 +151,7 @@ public sealed class MainForm : Form
         _file.Enabled = !live && !Busy;
         _browseFile.Enabled = !live && !Busy;
         _liveMode.Enabled = _fileMode.Enabled = !Busy;
-        _out.Enabled = _eq.Enabled = _browseOut.Enabled = _browseEq.Enabled = !Busy;
+        _out.Enabled = _eq.Enabled = _browseOut.Enabled = _browseEq.Enabled = _saveRaw.Enabled = !Busy;
         _start.Enabled = !Busy;
         _stop.Enabled = Busy;
         _start.Text = live ? "Start" : "Process";
@@ -199,6 +201,7 @@ public sealed class MainForm : Form
             return ClientStrings.Empty;
         }
         var s = ClientStrings.LoadFolder(folder);
+        foreach (var error in s.LoadErrors) Log("Could not read a client file, carrying on without it -- " + error);
         Log($"Client files read: {s.Titles.Count:N0} titles, {s.Descriptions.Count:N0} descriptions, {s.Spells.Count:N0} spells.");
         return s;
     }
@@ -239,6 +242,8 @@ public sealed class MainForm : Form
             _capture.Failed += ex => Log("Capture error: " + ex.Message);
             _liveStarted = DateTime.Now;
             _sessionHintShown = false;
+            _rawFolder = _out.Text.Trim();
+            _rawFailed = false;
             if (_saveRaw.Checked) _capture.Frame += SaveRawFrame;
             _capture.Start();
             _state.Text = "Capturing -- zone, look at items, buy or reset AAs.";
@@ -382,24 +387,25 @@ public sealed class MainForm : Form
 
     private void SaveRawFrame(int linkType, double time, byte[] data)
     {
+        if (_rawFailed) return;                                  // already reported; do not retry for every packet
         lock (_rawLock)
         {
             try
             {
                 if (_raw == null)
                 {
-                    Directory.CreateDirectory(_out.Text.Trim());
-                    _raw = new PcapWriter(Path.Combine(_out.Text.Trim(), $"capture-{DateTime.Now:yyyyMMdd-HHmmss}.pcap"), linkType);
+                    Directory.CreateDirectory(_rawFolder);
+                    _raw = new PcapWriter(Path.Combine(_rawFolder, $"capture-{DateTime.Now:yyyyMMdd-HHmmss-fff}-{Guid.NewGuid().ToString("N")[..4]}.pcap"), linkType);
                     Log("Saving the raw traffic to " + _raw.Path);
                 }
                 _raw.Write(time, data);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                Log("Cannot save the raw capture: " + ex.Message);
+                _rawFailed = true;
+                Log("Cannot save the raw capture: " + ex.Message + ". Raw saving is switched off for this run; decoding carries on.");
                 try { _raw?.Dispose(); } catch (IOException) { }
                 _raw = null;
-                _saveRaw.BeginInvoke(() => _saveRaw.Checked = false);          // stop trying
             }
         }
     }

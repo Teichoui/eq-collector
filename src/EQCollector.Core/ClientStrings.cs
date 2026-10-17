@@ -15,6 +15,9 @@ public sealed class ClientStrings
     public Dictionary<int, string> Descriptions { get; } = new();
     public Dictionary<int, string> Spells { get; } = new();
 
+    /// <summary>Files that could not be read (locked, missing permission, vanished). The rest of the strings are still loaded.</summary>
+    public List<string> LoadErrors { get; } = new();
+
     public static ClientStrings Empty => new();
 
     /// <summary>Loads from an EverQuest folder (or any folder holding the two files). Missing files just leave that part empty.</summary>
@@ -23,9 +26,21 @@ public sealed class ClientStrings
         var s = new ClientStrings();
         string dbstr = Path.Combine(folder, "dbstr_us.txt");
         string spells = Path.Combine(folder, "spells_us.txt");
-        if (File.Exists(dbstr)) s.LoadDbStr(dbstr);
-        if (File.Exists(spells)) s.LoadSpells(spells);
+        if (File.Exists(dbstr)) s.TryLoad(() => s.LoadDbStr(dbstr), dbstr);
+        if (File.Exists(spells)) s.TryLoad(() => s.LoadSpells(spells), spells);
         return s;
+    }
+
+    private void TryLoad(Action load, string path)
+    {
+        try
+        {
+            load();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            LoadErrors.Add($"{path}: {ex.Message}");
+        }
     }
 
     public void LoadDbStr(string path)

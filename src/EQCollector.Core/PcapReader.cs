@@ -168,6 +168,9 @@ public static class PcapReader
                 else yield break;                  // not a byte-order magic: the file is damaged here
                 uint sectionLength = swapped ? SwapU32(rawLength) : rawLength;
                 if (sectionLength < 28 || sectionLength % 4 != 0 || blockStart + sectionLength > stream.Length) yield break;
+                stream.Position = blockStart + sectionLength - 4;
+                uint sectionTrailer = U32();
+                if (sectionTrailer != sectionLength) yield break;       // the closing length copy disagrees: damaged
                 interfaces.Clear();
                 stream.Position = blockStart + sectionLength;
                 continue;
@@ -177,6 +180,10 @@ public static class PcapReader
             uint type = swapped ? SwapU32(rawType) : rawType;
             if (total < 12 || total % 4 != 0 || blockStart + total > stream.Length) yield break;
             long blockEnd = blockStart + total;
+            long afterHeader = stream.Position;
+            stream.Position = blockEnd - 4;
+            if (U32() != total) yield break;                             // the closing length copy disagrees: damaged
+            stream.Position = afterHeader;
 
             switch (type)
             {

@@ -340,6 +340,170 @@ public class RobustnessTests
     }
 
     [Fact]
+    public void A_new_session_with_no_captured_request_takes_over_once_its_packets_checksum()
+    {
+        var got = new List<AppPacket>();
+        var reader = new EQStreamReader(got.Add);
+        Connect(reader, 0xC0A80105, 50000);                                    // the old session, never seen to disconnect
+
+        var newWireKey = new byte[] { 11, 12, 13, 14 };
+        var newKey = new byte[] { 14, 13, 12, 11 };
+        // the new session's response arrives (its request was not captured) ...
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, Concat(Be16(2), Be32(0x0BADF00D), newWireKey, new byte[3], Be32(512), new byte[4]), 3);
+        // ... a packet from the OLD session still decodes (the response alone changed nothing) ...
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, StoredData(1, App(0x1111, new byte[30])), 4);
+        // ... and the first packet that checksums under the NEW key makes it the session
+        var body = Concat(new byte[] { 0xA5 }, Be16(1), App(0x2222, new byte[30]));
+        var crc = Crc32.HashToUInt32(Concat(newKey, Be16(0x09), body)) & 0xFFFF;
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, Concat(Be16(0x09), body, Be16((int)crc)), 5);
+
+        Assert.Equal(new[] { 0x1111, 0x2222 }, got.Select(p => (int)p.Opcode).ToArray());
+        Assert.Equal(2, reader.SessionsSeen);                                  // the old session, then the promoted one
+    }
+
+    [Fact]
+    public void A_new_session_on_another_server_takes_over_when_its_request_was_not_captured()
+    {
+        var got = new List<AppPacket>();
+        var reader = new EQStreamReader(got.Add);
+        Connect(reader, 0xC0A80105, 50000);                                    // an old session with the first server
+
+        const uint server2 = 0x45AE0203;                                       // a zone change: another server, same client port
+        var wire = new byte[] { 21, 22, 23, 24 };
+        var key2 = new byte[] { 24, 23, 22, 21 };
+        reader.Feed(server2, 0xC0A80105, ServerPort, 50000, Concat(Be16(2), Be32(0x0C0FFEE0), wire, new byte[3], Be32(512), new byte[4]), 3);
+        var body = Concat(new byte[] { 0xA5 }, Be16(1), App(0x3333, new byte[30]));
+        var crc = Crc32.HashToUInt32(Concat(key2, Be16(0x09), body)) & 0xFFFF;
+        reader.Feed(server2, 0xC0A80105, ServerPort, 50000, Concat(Be16(0x09), body, Be16((int)crc)), 4);
+
+        Assert.Equal(0x3333, Assert.Single(got).Opcode);
+    }
+
+    [Fact]
+    public void A_retransmitted_response_does_not_reset_the_session_or_its_half_built_fragments()
+    {
+        var got = new List<AppPacket>();
+        var reader = new EQStreamReader(got.Add);
+        Connect(reader, 0xC0A80105, 50000);
+        Assert.Equal(1, reader.SessionsSeen);
+
+        var big = Enumerable.Range(0, 900).Select(i => (byte)(i % 211)).ToArray();
+        var app = App(0x77d4, big);
+        var whole = Concat(Be32((uint)app.Length), app);
+        var pieces = Enumerable.Range(0, (whole.Length + 399) / 400).Select(i => whole.Skip(i * 400).Take(400).ToArray()).ToList();
+        void Send(int index) =>
+            reader.Feed(Server, 0xC0A80105, ServerPort, 50000, WithCrc(0x0D, Concat(new byte[] { 0xA5 }, Be16(300 + index), pieces[index])), 3);
+
+        Send(0);
+        // the server's response is retransmitted while the message is half-assembled
+        reader.Feed(Server, 0xC0A80105, ServerPort, 50000, Concat(Be16(2), Be32(0x01020304), WireKey, new byte[3], Be32(512), new byte[4]), 3);
+        for (int i = 1; i < pieces.Count; i++) Send(i);
+
+        Assert.Equal(big, Assert.Single(got).Data);
+        Assert.Equal(1, reader.SessionsSeen);
+    }
+
+    [Fact]
+    public void A_pcapng_block_whose_closing_length_disagrees_ends_the_file_there()
+    {
+        var frame = UdpFrame(20 + 8 + 10, 10);
+        int padded = (frame.Length + 3) & ~3;
+        uint blockLength = (uint)(32 + padded);
+        var shb = Concat(new byte[] { 0x0A, 0x0D, 0x0D, 0x0A }, BitConverter.GetBytes(28u), BitConverter.GetBytes(0x1A2B3C4Du),
+            BitConverter.GetBytes((ushort)1), BitConverter.GetBytes((ushort)0), BitConverter.GetBytes(-1L), BitConverter.GetBytes(28u));
+        var idb = Concat(BitConverter.GetBytes(1u), BitConverter.GetBytes(20u), BitConverter.GetBytes((ushort)1), BitConverter.GetBytes((ushort)0),
+            BitConverter.GetBytes(65535u), BitConverter.GetBytes(20u));
+        byte[] Epb(uint trailer) => Concat(BitConverter.GetBytes(6u), BitConverter.GetBytes(blockLength), BitConverter.GetBytes(0u), BitConverter.GetBytes(0u),
+            BitConverter.GetBytes(0u), BitConverter.GetBytes((uint)frame.Length), BitConverter.GetBytes((uint)frame.Length), frame,
+            new byte[padded - frame.Length], BitConverter.GetBytes(trailer));
+        var path = TempFile(Concat(shb, idb, Epb(blockLength), Epb(blockLength + 4), Epb(blockLength)));   // the middle block is damaged
+        try { Assert.Single(PcapReader.ReadFrames(path).ToList()); }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void A_raw_capture_file_is_never_overwritten()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "eqc-" + Guid.NewGuid().ToString("N") + ".pcap");
+        try
+        {
+            using (var first = new PcapWriter(path, FrameParser.LinkEthernet)) first.Write(1, UdpFrame(20 + 8 + 10, 10));
+            long length = new FileInfo(path).Length;
+            Assert.Throws<IOException>(() => new PcapWriter(path, FrameParser.LinkEthernet));
+            Assert.Equal(length, new FileInfo(path).Length);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void An_unreadable_client_file_is_reported_and_the_rest_still_loads()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "dbstr_us.txt"), "5^1^Innate Eminence^0^\n");
+        File.WriteAllText(Path.Combine(dir, "spells_us.txt"), "100^Complete Heal^0\n");
+        try
+        {
+            using (var locked = new FileStream(Path.Combine(dir, "spells_us.txt"), FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                var s = ClientStrings.LoadFolder(dir);                         // must not throw
+                Assert.Single(s.Titles);
+                Assert.Empty(s.Spells);
+                Assert.Single(s.LoadErrors);
+            }
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void A_fragment_that_looks_like_a_start_does_not_cost_the_real_message_when_the_first_fragment_is_late()
+    {
+        var got = new List<AppPacket>();
+        var reader = new EQStreamReader(got.Add);
+        Connect(reader, 0xC0A80105, 50000);
+
+        var big = new byte[1100];
+        new Random(5).NextBytes(big);
+        var app = App(0x77d4, big);                                    // whole = 4-byte length + app; pieces of 400
+        var whole = Concat(Be32((uint)app.Length), app);
+        // make the SECOND piece begin with 00 00 00 05, which, read as a "declared length", is small and plausible
+        Buffer.BlockCopy(new byte[] { 0, 0, 0, 5 }, 0, whole, 400, 4);
+        var pieces = Enumerable.Range(0, (whole.Length + 399) / 400).Select(i => whole.Skip(i * 400).Take(400).ToArray()).ToList();
+        Assert.True(pieces.Count >= 3);
+
+        void Send(int index) =>
+            reader.Feed(Server, 0xC0A80105, ServerPort, 50000, WithCrc(0x0D, Concat(new byte[] { 0xA5 }, Be16(200 + index), pieces[index])), 3);
+        Send(1);                                                       // looks like a start with a tiny declared length
+        Send(2);                                                       // overshoots that "length"
+        Send(0);                                                       // the real first fragment, late
+
+        var p = Assert.Single(got);
+        Assert.Equal(0x77d4, p.Opcode);
+        Assert.Equal(big.Length, p.Data.Length);
+    }
+
+    [Fact]
+    public void An_aa_file_that_cannot_be_read_is_never_replaced()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "aa.jsonl");
+        const string original = "{\"aa_id\":1,\"rank\":1,\"title\":\"A1\"}\n";
+        File.WriteAllText(path, original);
+        try
+        {
+            using (var locked = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))   // reading it will fail
+            using (var engine = new CollectorEngine(dir))
+            {
+                Assert.Equal(0, engine.FlushAa());                        // nothing to write, and nothing replaced
+            }
+            Assert.Equal(original, File.ReadAllText(path));
+            Assert.False(File.Exists(Path.Combine(dir, "aa.jsonl.tmp")));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void Flushing_AAs_never_shrinks_or_empties_an_existing_aa_file()
     {
         var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));

@@ -24,6 +24,7 @@ public sealed class CollectorEngine : IDisposable
     private readonly HashSet<long> _onDisk = new();                   // ids already in items.jsonl
     private readonly Action<string>? _log;
     private readonly Dictionary<(uint AaId, uint Rank), string> _aaOnDisk = new();   // lines already in aa.jsonl
+    private bool _aaLoadFailed;                    // aa.jsonl could not be read completely: it must not be replaced
     private StreamWriter? _itemsFile;
     private bool _writingFailed;
 
@@ -68,6 +69,7 @@ public sealed class CollectorEngine : IDisposable
     {
         var path = Path.Combine(OutputFolder, "aa.jsonl");
         if (!File.Exists(path)) return;
+        var loaded = new Dictionary<(uint AaId, uint Rank), string>();     // only kept when the whole file was read
         try
         {
             foreach (var line in File.ReadLines(path))
@@ -80,17 +82,21 @@ public sealed class CollectorEngine : IDisposable
                     if (root.ValueKind == JsonValueKind.Object
                         && root.TryGetProperty("aa_id", out var id) && id.TryGetUInt32(out var aaId)
                         && root.TryGetProperty("rank", out var rank) && rank.TryGetUInt32(out var r))
-                        _aaOnDisk[(aaId, r)] = line;
+                        loaded[(aaId, r)] = line;
                 }
                 catch (JsonException)
                 {
                 }
             }
+            foreach (var (key, line) in loaded) _aaOnDisk[key] = line;
             if (_aaOnDisk.Count > 0) _log?.Invoke($"{_aaOnDisk.Count:N0} AA ranks are already in aa.jsonl; this run's ranks will be added to them.");
         }
         catch (IOException ex)
         {
-            Report("Could not read the existing aa.jsonl: " + ex.Message);
+            // A partial read must never be written back over the original, so aa.jsonl is left alone and this run's
+            // ranks go to aa.partial.jsonl instead.
+            _aaLoadFailed = true;
+            Report("Could not read the existing aa.jsonl completely: " + ex.Message + ". It will not be replaced; this run's ranks are saved to aa.partial.jsonl.");
         }
     }
 
@@ -198,7 +204,7 @@ public sealed class CollectorEngine : IDisposable
     /// </summary>
     public int FlushAa()
     {
-        var path = Path.Combine(OutputFolder, "aa.jsonl");
+        var path = Path.Combine(OutputFolder, _aaLoadFailed ? "aa.partial.jsonl" : "aa.jsonl");
         var temp = path + ".tmp";
 
         var merged = new Dictionary<(uint AaId, uint Rank), string>(_aaOnDisk);
