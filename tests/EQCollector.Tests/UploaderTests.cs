@@ -691,6 +691,22 @@ public class UploaderTests
         finally { Directory.Delete(dir, true); }
     }
 
+    [Fact]
+    public async Task AA_ranks_queued_for_review_count_as_sent_and_are_not_sent_again()
+    {
+        var dir = TempDir();
+        try
+        {
+            var site = new FakeSite { Answer = (_, json) => FakeSite.Ok($"{{\"aa_saved\":0,\"aa_skipped\":0,\"aa_queued\":{json.GetProperty("aa").GetArrayLength()}}}") };
+            using var up = Make(site, dir);
+            var r = await up.UploadAsync(new List<IReadOnlyDictionary<string, object?>>(), new[] { Aa(1), Aa(2) });
+            Assert.Equal(2, r.AaQueued);
+            Assert.Equal(0, r.AaSaved);
+            Assert.Equal(0, (await up.UploadAsync(new List<IReadOnlyDictionary<string, object?>>(), new[] { Aa(1), Aa(2) })).AaSent);
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
     private static async Task WaitFor(Func<bool> condition, int seconds = 5)
     {
         var until = DateTime.UtcNow.AddSeconds(seconds);
