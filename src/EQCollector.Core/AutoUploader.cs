@@ -70,7 +70,7 @@ public sealed class AutoUploader : IDisposable
         }
     }
 
-    private enum Outcome { Ok, Unavailable, AuthFailed }
+    private enum Outcome { Ok, Unavailable, AuthFailed, Cancelled }
 
     private async Task<Outcome> RoundAsync(CancellationToken ct)
     {
@@ -108,7 +108,7 @@ public sealed class AutoUploader : IDisposable
         }
         catch (OperationCanceledException)
         {
-            return Outcome.Ok;
+            return Outcome.Cancelled;
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
@@ -128,7 +128,7 @@ public sealed class AutoUploader : IDisposable
         try { if (_loop != null) await _loop; } catch (OperationCanceledException) { }
         if (_stopped) return false;
         using var final = new CancellationTokenSource(finalWait);
-        return await RoundAsync(final.Token) == Outcome.Ok && _items.Count == 0;
+        return await RoundAsync(final.Token) == Outcome.Ok && _items.Count == 0 && _aa == null && _caughtUp;
     }
 
     public void Dispose()

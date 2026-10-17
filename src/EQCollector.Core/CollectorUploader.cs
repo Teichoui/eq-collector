@@ -67,7 +67,7 @@ public sealed class CollectorUploader : IDisposable
         _http.BaseAddress = new Uri(_server + "/");
         _http.Timeout = TimeSpan.FromSeconds(90);
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.Trim());
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("EQCollector/" + (typeof(CollectorUploader).Assembly.GetName().Version?.ToString(3) ?? "0"));
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("EQCollector/" + ((System.Reflection.Assembly.GetEntryAssembly() ?? typeof(CollectorUploader).Assembly).GetName().Version?.ToString(3) ?? "0"));
         _http.DefaultRequestHeaders.Accept.ParseAdd("application/json");
         Directory.CreateDirectory(stateFolder);
         _statePath = Path.Combine(stateFolder, "upload-state.json");
@@ -190,6 +190,7 @@ public sealed class CollectorUploader : IDisposable
         {
             using var response = await SendAsync(() => JsonRequest("api/collector/upload", new Dictionary<string, object?> { ["aa"] = batch.Select(b => b.Record).ToList() }), ct);
             var doc = await ReadJson(response, ct);
+            RequireCounters(doc, "aa_saved", "aa_skipped");
             aaSent += batch.Length;
             aaSaved += Int(doc, "aa_saved");
             // Ranks the server declined (a non-trusted token) are remembered for this token only, or every round would send
@@ -215,8 +216,12 @@ public sealed class CollectorUploader : IDisposable
     /// <summary>aa.jsonl, then aa.partial.jsonl (where a run writes when it could not read the old aa.jsonl completely); the later file wins.</summary>
     private static List<IReadOnlyDictionary<string, object?>> ReadAaLines(string folder)
     {
-        var list = ReadJsonLines(Path.Combine(folder, "aa.jsonl"));
-        list.AddRange(ReadJsonLines(Path.Combine(folder, "aa.partial.jsonl")));
+        string main = Path.Combine(folder, "aa.jsonl"), partial = Path.Combine(folder, "aa.partial.jsonl");
+        var list = ReadJsonLines(main);
+        // The fallback file only counts while it is the newer one: once aa.jsonl can be written again it is older, and its
+        // ranks must not override the newer ones.
+        if (File.Exists(partial) && (!File.Exists(main) || File.GetLastWriteTimeUtc(partial) >= File.GetLastWriteTimeUtc(main)))
+            list.AddRange(ReadJsonLines(partial));
         return list;
     }
 
@@ -284,6 +289,7 @@ public sealed class CollectorUploader : IDisposable
         }
 
         var doc = await ReadJson(response, ct);
+        RequireCounters(doc, "items_added", "items_queued", "items_skipped");
         return new ItemResult(batch.Count, Int(doc, "items_added"), Int(doc, "items_queued"), 0);
     }
 
@@ -359,6 +365,12 @@ public sealed class CollectorUploader : IDisposable
     }
 
     // ---- helpers ----------------------------------------------------------------------------------------------------
+
+    /// <summary>The website always answers an upload with its counters; a reply without them (a proxy, an old server) is not an acknowledgement.</summary>
+    private static void RequireCounters(JsonElement doc, params string[] names)
+    {
+        if (doc.ValueKind != JsonValueKind.Object || !names.Any(n => doc.TryGetProperty(n, out _))) throw Unexpected();
+    }
 
     private static UploadUnavailableException Unexpected() => new("The website's answer was not what was expected (is the address right?).");
 

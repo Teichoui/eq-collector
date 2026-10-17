@@ -465,6 +465,59 @@ public class UploaderTests
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
     }
 
+    [Fact]
+    public async Task A_reply_without_the_websites_counters_is_not_an_acknowledgement()
+    {
+        var dir = TempDir();
+        try
+        {
+            var site = new FakeSite { Answer = (path, _) => path == "/api/collector/check" ? FakeSite.Ok("{\"missing_items\":[1]}") : FakeSite.Ok("{}") };
+            using var up = Make(site, dir);
+            await Assert.ThrowsAsync<UploadUnavailableException>(() => up.UploadAsync(new[] { Item(1) }, NoAa));
+            Assert.Equal(0, up.KnownItems - 0);                            // not remembered as sent: nothing was acknowledged
+
+            var aaSite = new FakeSite { Answer = (_, _) => FakeSite.Ok("{}") };
+            using var up2 = Make(aaSite, TempDir());
+            await Assert.ThrowsAsync<UploadUnavailableException>(() => up2.UploadAsync(new List<IReadOnlyDictionary<string, object?>>(), new[] { Aa(1) }));
+            Assert.Equal(0, up2.KnownAa);
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task A_stale_fallback_AA_file_does_not_override_a_newer_aa_file()
+    {
+        var dir = TempDir();
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var partial = Path.Combine(dir, "aa.partial.jsonl");
+            var main = Path.Combine(dir, "aa.jsonl");
+            File.WriteAllText(partial, "{\"rank_id\":1,\"aa_id\":1,\"rank\":1,\"title\":\"stale\"}\n");
+            File.SetLastWriteTimeUtc(partial, DateTime.UtcNow.AddDays(-2));
+            File.WriteAllText(main, "{\"rank_id\":1,\"aa_id\":1,\"rank\":1,\"title\":\"fresh\"}\n");
+            var site = new FakeSite { Answer = (_, json) => FakeSite.Ok($"{{\"aa_saved\":{json.GetProperty("aa").GetArrayLength()},\"aa_skipped\":0}}") };
+            using var up = Make(site, dir);
+            await up.UploadFolderAsync(dir);
+            Assert.Contains("fresh", site.Requests.Single().Body);
+            Assert.DoesNotContain("stale", site.Requests.Single().Body);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task A_final_attempt_that_times_out_is_incomplete_even_with_nothing_queued_but_the_catch_up()
+    {
+        var dir = TempDir();
+        try
+        {
+            using var uploader = Make(new FakeSite { Answer = (_, _) => FakeSite.Ok("{}") }, dir);
+            using var auto = new AutoUploader(uploader, () => new UploadBatch(new(), null), null, async ct => { await Task.Delay(TimeSpan.FromSeconds(30), ct); }) { Interval = TimeSpan.FromHours(1) };
+            Assert.False(await auto.StopAsync(TimeSpan.FromMilliseconds(100)));    // the catch-up did not finish in time
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
     private static async Task WaitFor(Func<bool> condition, int seconds = 5)
     {
         var until = DateTime.UtcNow.AddSeconds(seconds);
