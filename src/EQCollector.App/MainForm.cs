@@ -327,7 +327,7 @@ public sealed class MainForm : Form
                 var engine = CollectorEngine.ProcessFile(path, outDir, strings, Log, n => Volatile.Write(ref _fileProgress, n), token);
                 lock (_engineLock) { _engine = engine; _engineClosed = true; }   // ProcessFile already flushed and closed it
                 Log($"Done: {engine.Packets:N0} packets, {engine.ItemCount:N0} items, {engine.AaCount:N0} AA ranks. Saved to {outDir}");
-                if (uploadAfter) UploadFolderQuietly(outDir, upServer, upToken);
+                if (uploadAfter) UploadFolderQuietly(outDir, upServer, upToken, token);
             }
             catch (OperationCanceledException)
             {
@@ -349,13 +349,17 @@ public sealed class MainForm : Form
     }
 
     /// <summary>On the file worker thread: sends the finished run's items and AA ranks (the whole folder; what was sent before is skipped).</summary>
-    private void UploadFolderQuietly(string folder, string server, string tokenText)
+    private void UploadFolderQuietly(string folder, string server, string tokenText, CancellationToken cancel)
     {
         try
         {
             using var uploader = new CollectorUploader(server, tokenText, folder, Log);
-            var r = uploader.UploadFolderAsync(folder).GetAwaiter().GetResult();
+            var r = uploader.UploadFolderAsync(folder, cancel).GetAwaiter().GetResult();
             Log($"Uploaded: {r.ItemsAdded:N0} new items added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved.");
+        }
+        catch (OperationCanceledException)
+        {
+            Log("Upload cancelled; what is saved goes up next time (or press \"Upload saved files now\").");
         }
         catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException or IOException or UnauthorizedAccessException)
         {
@@ -486,7 +490,7 @@ public sealed class MainForm : Form
             if (_token.Text.Trim().Length == 0) throw new ArgumentException("Paste your upload token first (the website's capture-token page).");
             return new CollectorUploader(_server.Text, _token.Text, _out.Text.Trim(), Log);
         }
-        catch (ArgumentException ex)
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
         {
             if (!quietIfNotSet) MessageBox.Show(this, ex.Message, "Website upload", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return null;
@@ -502,7 +506,7 @@ public sealed class MainForm : Form
         engine.CollectForUpload = true;
         _liveUploader = uploader;
         string folder = _out.Text.Trim();
-        _autoUploader = new AutoUploader(uploader, () => { lock (_engineLock) return _engine?.TakeUpload() ?? new UploadBatch(new(), null); }, Log,
+        _autoUploader = new AutoUploader(uploader, () => { lock (_engineLock) return engine.TakeUpload(); }, Log,       // its own engine, never a later run's
             ct => uploader.UploadFolderAsync(folder, ct));      // first: whatever earlier runs saved but never got sent
         _autoUploader.Start();
         Log($"Uploading new items and AA ranks to {uploader.Server}.");

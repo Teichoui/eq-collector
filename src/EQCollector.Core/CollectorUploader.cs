@@ -37,6 +37,7 @@ public sealed class CollectorUploader : IDisposable
     public const int AaBatch = 200;
     private const int CheckBatch = 2000;
     private const int MaxRateLimitRetries = 3;
+    private static readonly TimeSpan MaxRateLimitWait = TimeSpan.FromMinutes(2);
 
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = false, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
@@ -44,6 +45,7 @@ public sealed class CollectorUploader : IDisposable
     private readonly string _statePath;
     private readonly Action<string>? _log;
     private readonly string _server;
+    private readonly string _tokenId;                  // which token this is (not the token): declined AA ranks are per token
     private readonly UploadState _state;
 
     // Several uploaders can exist at once (the background one and a manual "upload saved files"): they take turns, and they
@@ -60,6 +62,7 @@ public sealed class CollectorUploader : IDisposable
         _server = uri.ToString().TrimEnd('/');
         if (string.IsNullOrWhiteSpace(token)) throw new ArgumentException("An upload token is needed.", nameof(token));
         _log = log;
+        _tokenId = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token.Trim())))[..12];
         _http = handler != null ? new HttpClient(handler) : new HttpClient();
         _http.BaseAddress = new Uri(_server + "/");
         _http.Timeout = TimeSpan.FromSeconds(90);
@@ -119,7 +122,8 @@ public sealed class CollectorUploader : IDisposable
     {
         using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, "api/collector/ping"), ct);
         var doc = await ReadJson(response, ct);
-        return new PingResult(Bool(doc, "ok"), Bool(doc, "trusted"), Text(doc, "site"));
+        if (!Bool(doc, "ok")) throw Unexpected();         // a wrong address or a proxy answering 200 with something else
+        return new PingResult(true, Bool(doc, "trusted"), Text(doc, "site"));
     }
 
     /// <summary>
@@ -164,12 +168,23 @@ public sealed class CollectorUploader : IDisposable
         }
 
         // ---- AA ranks: sent when new or changed -----------------------------------------------------------------------
-        var pending = new List<(long Id, string Hash, IReadOnlyDictionary<string, object?> Record)>();
+        if (_state.DeclinedFor != _tokenId)
+        {
+            _state.Declined.Clear();                      // another token may be allowed to store what the last one was not
+            _state.DeclinedFor = _tokenId;
+        }
+        var latest = new Dictionary<long, IReadOnlyDictionary<string, object?>>();
         foreach (var rank in aa)
         {
-            if (!TryId(rank, "rank_id", out long rid)) continue;
+            if (TryId(rank, "rank_id", out long rid)) latest[rid] = rank;                    // a later record of a rank replaces an earlier one
+        }
+        var pending = new List<(long Id, string Hash, IReadOnlyDictionary<string, object?> Record)>();
+        foreach (var (rid, rank) in latest)
+        {
             string hash = Hash(rank);
-            if (!_state.Aa.TryGetValue(rid, out var known) || known != hash) pending.Add((rid, hash, rank));
+            bool already = _state.Aa.TryGetValue(rid, out var known) && known == hash;
+            bool declined = _state.Declined.TryGetValue(rid, out var refused) && refused == hash;
+            if (!already && !declined) pending.Add((rid, hash, rank));
         }
         foreach (var batch in pending.Chunk(AaBatch))
         {
@@ -177,8 +192,14 @@ public sealed class CollectorUploader : IDisposable
             var doc = await ReadJson(response, ct);
             aaSent += batch.Length;
             aaSaved += Int(doc, "aa_saved");
-            // Ranks the server declined (a non-trusted token) are remembered too, or every round would send them again.
-            foreach (var b in batch) _state.Aa[b.Id] = b.Hash;
+            // Ranks the server declined (a non-trusted token) are remembered for this token only, or every round would send
+            // them again -- and a trusted token later still sends them.
+            bool declined = Int(doc, "aa_skipped") > 0;
+            foreach (var b in batch)
+            {
+                if (declined) _state.Declined[b.Id] = b.Hash;
+                else _state.Aa[b.Id] = b.Hash;
+            }
             _state.Save(_statePath);
         }
 
@@ -189,7 +210,15 @@ public sealed class CollectorUploader : IDisposable
 
     /// <summary>Uploads items.jsonl and aa.jsonl from a results folder (what an earlier run saved).</summary>
     public Task<UploadSummary> UploadFolderAsync(string folder, CancellationToken ct = default)
-        => UploadAsync(ReadJsonLines(Path.Combine(folder, "items.jsonl")), ReadJsonLines(Path.Combine(folder, "aa.jsonl")), ct);
+        => UploadAsync(ReadJsonLines(Path.Combine(folder, "items.jsonl")), ReadAaLines(folder), ct);
+
+    /// <summary>aa.jsonl, then aa.partial.jsonl (where a run writes when it could not read the old aa.jsonl completely); the later file wins.</summary>
+    private static List<IReadOnlyDictionary<string, object?>> ReadAaLines(string folder)
+    {
+        var list = ReadJsonLines(Path.Combine(folder, "aa.jsonl"));
+        list.AddRange(ReadJsonLines(Path.Combine(folder, "aa.partial.jsonl")));
+        return list;
+    }
 
     public static List<IReadOnlyDictionary<string, object?>> ReadJsonLines(string path)
     {
@@ -284,7 +313,8 @@ public sealed class CollectorUploader : IDisposable
             if (allowUnprocessable && response.StatusCode == (HttpStatusCode)422) return response;
 
             var code = response.StatusCode;
-            var retryAfter = response.Headers.RetryAfter?.Delta;
+            var retryAfter = response.Headers.RetryAfter?.Delta
+                ?? (response.Headers.RetryAfter?.Date is { } date ? date - DateTimeOffset.UtcNow : null);
             string detail = await SafeBody(response);
             response.Dispose();
 
@@ -292,7 +322,9 @@ public sealed class CollectorUploader : IDisposable
                 throw new UploadAuthException("The website did not accept the token. Check it at your account page and paste it again.");
             if (code == (HttpStatusCode)429 && attempt < MaxRateLimitRetries)
             {
-                await Task.Delay(retryAfter ?? RateLimitWait, ct);
+                var wait = retryAfter ?? RateLimitWait;
+                if (wait > MaxRateLimitWait) throw new UploadUnavailableException("The website asked to wait too long between requests; it will be tried again later.");
+                await Task.Delay(wait < TimeSpan.Zero ? TimeSpan.Zero : wait, ct);
                 continue;
             }
             throw new UploadUnavailableException($"The website answered {(int)code}{(detail.Length > 0 ? ": " + detail : "")}");
@@ -379,6 +411,8 @@ public sealed class CollectorUploader : IDisposable
         public HashSet<long> Items { get; set; } = new();
         public HashSet<long> Rejected { get; set; } = new();
         public Dictionary<long, string> Aa { get; set; } = new();
+        public Dictionary<long, string> Declined { get; set; } = new();     // AA ranks the server would not store for DeclinedFor's token
+        public string DeclinedFor { get; set; } = "";
 
         public static UploadState Load(string path, string server)
         {

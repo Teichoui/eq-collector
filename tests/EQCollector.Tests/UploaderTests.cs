@@ -301,9 +301,12 @@ public class UploaderTests
             var wrongCount = new FakeSite { Answer = (_, _) => FakeSite.Ok("{\"aa_saved\":\"1\"}") };
             using var up2 = Make(wrongCount, dir);
             await Assert.ThrowsAsync<UploadUnavailableException>(() => up2.UploadAsync(new List<IReadOnlyDictionary<string, object?>>(), new[] { Aa(1) }));
-            var ping = new FakeSite { Answer = (_, _) => FakeSite.Ok("[]") };
-            using var up3 = Make(ping, dir);
-            await Assert.ThrowsAsync<UploadUnavailableException>(() => up3.PingAsync());
+            foreach (var reply in new[] { "[]", "{}", "{\"ok\":false}" })
+            {
+                var ping = new FakeSite { Answer = (_, _) => FakeSite.Ok(reply) };
+                using var up3 = Make(ping, dir);
+                await Assert.ThrowsAsync<UploadUnavailableException>(() => up3.PingAsync());   // not "connected" just because something answered 200
+            }
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
     }
@@ -380,6 +383,84 @@ public class UploaderTests
             CollectorUploader.ForgetSharedStates();
             using var c = Make(site, dir);
             Assert.Equal(2, c.KnownItems);                                // and what is on disk has both
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task AA_ranks_a_token_could_not_store_are_sent_again_by_a_token_that_can()
+    {
+        var dir = TempDir();
+        try
+        {
+            bool trusted = false;
+            var site = new FakeSite { Answer = (_, json) => FakeSite.Ok(trusted ? $"{{\"aa_saved\":{json.GetProperty("aa").GetArrayLength()}}}" : $"{{\"aa_skipped\":{json.GetProperty("aa").GetArrayLength()}}}") };
+            var ranks = new[] { Aa(1), Aa(2) };
+            using (var plain = new CollectorUploader("https://example.test", "plain-token", dir, handler: site))
+            {
+                Assert.Equal(2, (await plain.UploadAsync(new List<IReadOnlyDictionary<string, object?>>(), ranks)).AaSent);
+                Assert.Equal(0, (await plain.UploadAsync(new List<IReadOnlyDictionary<string, object?>>(), ranks)).AaSent);   // declined: not re-sent every round
+            }
+            trusted = true;
+            using var mod = new CollectorUploader("https://example.test", "moderator-token", dir, handler: site);
+            var r = await mod.UploadAsync(new List<IReadOnlyDictionary<string, object?>>(), ranks);
+            Assert.Equal(2, r.AaSaved);                                   // the new token gets its turn
+            Assert.Equal(0, (await mod.UploadAsync(new List<IReadOnlyDictionary<string, object?>>(), ranks)).AaSent);
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task The_fallback_AA_file_is_uploaded_and_wins_over_the_old_file()
+    {
+        var dir = TempDir();
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "aa.jsonl"), "{\"rank_id\":1,\"aa_id\":1,\"rank\":1,\"title\":\"old\"}\n");
+            File.WriteAllText(Path.Combine(dir, "aa.partial.jsonl"), "{\"rank_id\":1,\"aa_id\":1,\"rank\":1,\"title\":\"new\"}\n{\"rank_id\":2,\"aa_id\":1,\"rank\":2,\"title\":\"two\"}\n");
+            var site = new FakeSite { Answer = (_, json) => FakeSite.Ok($"{{\"aa_saved\":{json.GetProperty("aa").GetArrayLength()}}}") };
+            using var up = Make(site, dir);
+            var r = await up.UploadFolderAsync(dir);
+            Assert.Equal(2, r.AaSent);                                    // one record per rank, the partial file's version
+            Assert.Contains("\"new\"", site.Requests.Single().Body);
+            Assert.DoesNotContain("\"old\"", site.Requests.Single().Body);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task A_rate_limit_that_asks_for_a_long_wait_is_unavailable_and_a_date_form_is_understood()
+    {
+        var dir = TempDir();
+        try
+        {
+            var tooLong = new FakeSite
+            {
+                Answer = (_, _) =>
+                {
+                    var res = new HttpResponseMessage((HttpStatusCode)429);
+                    res.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(DateTimeOffset.UtcNow.AddHours(1));
+                    return res;
+                },
+            };
+            using var up = Make(tooLong, dir);
+            await Assert.ThrowsAsync<UploadUnavailableException>(() => up.UploadAsync(new[] { Item(1) }, NoAa));
+            Assert.Single(tooLong.Requests);                              // it did not hammer the server
+
+            int calls = 0;
+            var soon = new FakeSite
+            {
+                Answer = (_, _) =>
+                {
+                    if (++calls > 1) return FakeSite.Ok("{\"missing_items\":[]}");
+                    var res = new HttpResponseMessage((HttpStatusCode)429);
+                    res.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(DateTimeOffset.UtcNow.AddMilliseconds(50));
+                    return res;
+                },
+            };
+            using var up2 = Make(soon, TempDir());
+            Assert.Equal(1, (await up2.UploadAsync(new[] { Item(7) }, NoAa)).ItemsChecked);
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
     }
