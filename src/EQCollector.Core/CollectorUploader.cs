@@ -531,6 +531,7 @@ public sealed class CollectorUploader : IDisposable
         public Dictionary<long, string> Aa { get; set; } = new();
         public Dictionary<long, string> Declined { get; set; } = new();     // AA ranks the server would not store for DeclinedFor's token
         public string DeclinedFor { get; set; } = "";
+        public int Version { get; set; }                                    // 2 = the website can queue AA ranks, so "declined" from before is stale
 
         public static UploadState Load(string path, string server)
         {
@@ -539,14 +540,22 @@ public sealed class CollectorUploader : IDisposable
                 if (File.Exists(path))
                 {
                     var s = JsonSerializer.Deserialize<UploadState>(File.ReadAllText(path));
-                    if (s != null && string.Equals(s.Server, server, StringComparison.OrdinalIgnoreCase)) return s;   // another site: start over
+                    if (s != null && string.Equals(s.Server, server, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (s.Version < 2)
+                        {
+                            s.Declined.Clear();                // refused before the website could queue AA ranks: offer them again
+                            s.Version = 2;
+                        }
+                        return s;
+                    }                                                                              // another site: start over
                 }
             }
             catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
             {
                 // an unreadable memory only means some things are sent again
             }
-            return new UploadState { Server = server };
+            return new UploadState { Server = server, Version = 2 };
         }
 
         /// <summary>Adds what another process recorded (this process's own entries win where both have one).</summary>

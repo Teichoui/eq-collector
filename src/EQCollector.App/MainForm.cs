@@ -355,7 +355,7 @@ public sealed class MainForm : Form
         {
             using var uploader = new CollectorUploader(server, tokenText, folder, Log);
             var r = uploader.UploadFolderAsync(folder, cancel).GetAwaiter().GetResult();
-            Log($"Uploaded: {r.ItemsAlreadyOnSite:N0} items were already on the website; {r.ItemsAdded:N0} new items added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved.");
+            Log($"Uploaded: {r.ItemsAlreadyOnSite:N0} items were already on the website; {r.ItemsAdded:N0} new items added, {r.ItemsQueued:N0} items and {r.AaQueued:N0} AA ranks queued for review, {r.AaSaved:N0} AA ranks saved.");
         }
         catch (OperationCanceledException)
         {
