@@ -26,10 +26,13 @@ public sealed class CollectorEngine : IDisposable
     private readonly HashSet<long> _onDisk = new();                   // ids already in items.jsonl
     private readonly Action<string>? _log;
     private readonly Dictionary<(uint AaId, uint Rank), string> _aaOnDisk = new();   // lines already in aa.jsonl
+    private bool _partialToRemove;                 // an earlier aa.partial.jsonl was merged in; delete it once aa.jsonl is written
     private bool _aaLoadFailed;                    // aa.jsonl could not be read completely: it must not be replaced
     private StreamWriter? _itemsFile;
     private bool _writingFailed;
     private bool _aaDirty;                         // ranks found since the file was last written
+    private readonly List<IReadOnlyDictionary<string, object?>> _uploadItems = new();   // found since the last TakeUpload
+    private bool _uploadAaChanged;
     private long _aaNextAutoSave;                  // Now() before which no automatic write is tried; 0 = no limit yet
     internal Func<long> Now = () => System.Diagnostics.Stopwatch.GetTimestamp();
 
@@ -41,6 +44,9 @@ public sealed class CollectorEngine : IDisposable
     public int AaCount => _aa.Count;
     public ushort? AaOpcode => _aa.Opcode;
     public bool AaBit64 => _aa.Bit64;
+
+    /// <summary>Keep each new item (and the ranks' changes) for <see cref="TakeUpload"/>; set when uploading to the website.</summary>
+    public bool CollectForUpload { get; set; }
 
     /// <summary>Write aa.jsonl while ranks arrive (used for live capture); a file run writes it once at the end.</summary>
     public bool AutoSaveAa { get; set; }
@@ -82,28 +88,15 @@ public sealed class CollectorEngine : IDisposable
     private void LoadExistingAa()
     {
         var path = Path.Combine(OutputFolder, "aa.jsonl");
-        if (!File.Exists(path)) return;
-        var loaded = new Dictionary<(uint AaId, uint Rank), string>();     // only kept when the whole file was read
+        var partialPath = Path.Combine(OutputFolder, "aa.partial.jsonl");
         try
         {
-            foreach (var line in File.ReadLines(path))
+            if (File.Exists(path))
             {
-                if (line.Length == 0) continue;
-                try
-                {
-                    using var doc = JsonDocument.Parse(line);
-                    var root = doc.RootElement;
-                    if (root.ValueKind == JsonValueKind.Object
-                        && root.TryGetProperty("aa_id", out var id) && id.TryGetUInt32(out var aaId)
-                        && root.TryGetProperty("rank", out var rank) && rank.TryGetUInt32(out var r))
-                        loaded[(aaId, r)] = line;
-                }
-                catch (JsonException)
-                {
-                }
+                var loaded = ReadAaLines(path);                           // only kept when the whole file was read
+                foreach (var (key, line) in loaded) _aaOnDisk[key] = line;
+                if (_aaOnDisk.Count > 0) _log?.Invoke($"{_aaOnDisk.Count:N0} AA ranks are already in aa.jsonl; this run's ranks will be added to them.");
             }
-            foreach (var (key, line) in loaded) _aaOnDisk[key] = line;
-            if (_aaOnDisk.Count > 0) _log?.Invoke($"{_aaOnDisk.Count:N0} AA ranks are already in aa.jsonl; this run's ranks will be added to them.");
         }
         catch (IOException ex)
         {
@@ -111,7 +104,47 @@ public sealed class CollectorEngine : IDisposable
             // ranks go to aa.partial.jsonl instead.
             _aaLoadFailed = true;
             Report("Could not read the existing aa.jsonl completely: " + ex.Message + ". It will not be replaced; this run's ranks are saved to aa.partial.jsonl.");
+            return;
         }
+
+        // aa.jsonl can be written again, so a fallback file left by an earlier run is folded in (its ranks were captured
+        // later than what aa.jsonl held then) and removed once aa.jsonl has been written.
+        try
+        {
+            if (File.Exists(partialPath))
+            {
+                var fromPartial = ReadAaLines(partialPath);
+                foreach (var (key, line) in fromPartial) _aaOnDisk[key] = line;
+                _partialToRemove = true;
+                _log?.Invoke($"{fromPartial.Count:N0} AA ranks from an earlier aa.partial.jsonl will be merged into aa.jsonl.");
+            }
+        }
+        catch (IOException)
+        {
+            // left alone: it is merged next time
+        }
+    }
+
+    private static Dictionary<(uint AaId, uint Rank), string> ReadAaLines(string path)
+    {
+        var loaded = new Dictionary<(uint AaId, uint Rank), string>();
+        foreach (var line in File.ReadLines(path))
+        {
+            if (line.Length == 0) continue;
+            try
+            {
+                using var doc = JsonDocument.Parse(line);
+                var root = doc.RootElement;
+                if (root.ValueKind == JsonValueKind.Object
+                    && root.TryGetProperty("aa_id", out var id) && id.TryGetUInt32(out var aaId)
+                    && root.TryGetProperty("rank", out var rank) && rank.TryGetUInt32(out var r))
+                    loaded[(aaId, r)] = line;
+            }
+            catch (JsonException)
+            {
+            }
+        }
+        return loaded;
     }
 
     /// <summary>Reads the ids already in items.jsonl, so a second run (or a restart) does not write the same items again.</summary>
@@ -156,6 +189,7 @@ public sealed class CollectorEngine : IDisposable
             {
                 if (!_items.TryAdd(found.Item.Id, found.Item)) continue;
                 if (_onDisk.Add(found.Item.Id)) AppendItem(found.Item);
+                if (CollectForUpload) _uploadItems.Add(ItemToDictionary(found.Item).ToDictionary(kv => kv.Key, kv => (object?)kv.Value));
                 ItemFound?.Invoke(found.Item);
             }
         }
@@ -164,6 +198,7 @@ public sealed class CollectorEngine : IDisposable
         int before = _aa.Count;
         var rank = _aa.OnPacket(p);
         if (_aa.Count != before) _aaDirty = true;     // the packets buffered while the AA opcode was unknown decode without returning a rank
+        if (_aa.Count != before || rank != null) _uploadAaChanged = true;
         if (!hadOpcode && _aa.Opcode != null) _log?.Invoke($"AA packets found (application opcode 0x{_aa.Opcode:x})");
         if (rank != null)
         {
@@ -174,6 +209,24 @@ public sealed class CollectorEngine : IDisposable
     }
 
     internal void MarkAaChanged() => _aaDirty = true;
+
+    /// <summary>
+    /// What the capture found since the last call, for the website upload: the new items, and all AA ranks when any rank
+    /// changed (null otherwise). Items already in items.jsonl from an earlier run are not included here, so a restart does
+    /// not re-queue them -- <see cref="CollectorUploader.UploadFolderAsync"/> covers those.
+    /// </summary>
+    public UploadBatch TakeUpload()
+    {
+        var items = new List<IReadOnlyDictionary<string, object?>>(_uploadItems);
+        _uploadItems.Clear();
+        List<IReadOnlyDictionary<string, object?>>? aa = null;
+        if (_uploadAaChanged)
+        {
+            _uploadAaChanged = false;
+            aa = _aa.Records.Select(r => (IReadOnlyDictionary<string, object?>)AaToDictionary(r)).ToList();
+        }
+        return new UploadBatch(items, aa);
+    }
 
     /// <summary>Saves aa.jsonl when ranks have arrived since the last write and the interval has passed. Called for every
     /// packet and by the caller's own timer (so the end of a burst is written even when the game goes quiet); the caller
@@ -254,6 +307,11 @@ public sealed class CollectorEngine : IDisposable
                 foreach (var key in merged.Keys.OrderBy(k => k.AaId).ThenBy(k => k.Rank)) w.WriteLine(merged[key]);
             }
             File.Move(temp, path, overwrite: true);
+            if (_partialToRemove && !_aaLoadFailed)
+            {
+                try { File.Delete(Path.Combine(OutputFolder, "aa.partial.jsonl")); _partialToRemove = false; }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* merged again next time */ }
+            }
             foreach (var (key, line) in merged) _aaOnDisk[key] = line;
             _aaDirty = false;
             _aaNextAutoSave = Now() + (long)(AutoSaveInterval.TotalSeconds * System.Diagnostics.Stopwatch.Frequency);

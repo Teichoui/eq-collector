@@ -661,6 +661,29 @@ public class RobustnessTests
     }
 
     [Fact]
+    public void A_fallback_aa_file_from_an_earlier_run_is_folded_into_aa_jsonl_and_removed()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "aa.jsonl"), "{\"aa_id\":1,\"rank\":1,\"title\":\"old one\"}\n{\"aa_id\":2,\"rank\":1,\"title\":\"two\"}\n");
+            File.WriteAllText(Path.Combine(dir, "aa.partial.jsonl"), "{\"aa_id\":1,\"rank\":1,\"title\":\"recovered\"}\n{\"aa_id\":3,\"rank\":1,\"title\":\"three\"}\n");
+            using (var engine = new CollectorEngine(dir))
+            {
+                Assert.Equal(3, engine.FlushAa());
+            }
+            var text = File.ReadAllText(Path.Combine(dir, "aa.jsonl"));
+            Assert.Contains("recovered", text);                       // the fallback file's version of a rank
+            Assert.DoesNotContain("old one", text);
+            Assert.Contains("\"two\"", text);
+            Assert.Contains("\"three\"", text);
+            Assert.False(File.Exists(Path.Combine(dir, "aa.partial.jsonl")));      // merged, so it is gone
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void Flushing_with_no_AAs_anywhere_creates_no_file()
     {
         var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));

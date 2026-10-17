@@ -25,6 +25,11 @@ public sealed class MainForm : Form
     private readonly Button _stop = new() { Text = "Stop", Width = 110, Height = 32, Enabled = false };
     private readonly Button _saveAa = new() { Text = "Save AAs now", AutoSize = true };
     private readonly Button _openOut = new() { Text = "Open output folder", AutoSize = true };
+    private readonly CheckBox _upload = new() { Text = "Upload new items and AA ranks to the website while capturing", AutoSize = true };
+    private readonly TextBox _server = new() { Width = 250 };
+    private readonly TextBox _token = new() { Width = 250, UseSystemPasswordChar = true };
+    private readonly Button _testUpload = new() { Text = "Test", AutoSize = true };
+    private readonly Button _uploadSaved = new() { Text = "Upload saved files now", AutoSize = true };
     private readonly CheckBox _saveRaw = new() { Text = "Also save the raw capture (.pcap) while capturing, so problems can be analysed", AutoSize = true, Checked = true };
     private readonly Label _state = new() { AutoSize = true, Text = "Ready." };
     private readonly Label _stats = new() { AutoSize = false, Height = 40, Dock = DockStyle.Fill, Font = new Font("Consolas", 10f), Text = "" };   // wraps instead of clipping in a narrow window
@@ -45,20 +50,28 @@ public sealed class MainForm : Form
     private bool _sessionHintShown;
     private bool _engineClosed;                 // the engine has been flushed and closed: Stop must not do it again
     private Task? _fileTask;
+    private AutoUploader? _autoUploader;           // the live capture's background upload
+    private CollectorUploader? _liveUploader;
+    private Task? _uploadStopTask;                 // the final upload after Stop
+    private volatile bool _uploadBusy;             // "Test" / "Upload saved files now" is running
 
     public MainForm()
     {
         Text = "EQ Collector " + typeof(MainForm).Assembly.GetName().Version?.ToString(3);
-        ClientSize = new Size(760, 640);
-        MinimumSize = new Size(700, 560);
+        ClientSize = new Size(760, 760);
+        MinimumSize = new Size(700, 680);
         StartPosition = FormStartPosition.CenterScreen;
 
         _out.Text = _settings.OutputFolder;
         _eq.Text = _settings.EqFolder;
         _file.Text = _settings.CaptureFile;
         _saveRaw.Checked = _settings.SaveRawCapture;
+        _upload.Checked = _settings.UploadEnabled;
+        _server.Text = _settings.UploadServer;
+        _token.Text = _settings.UploadToken;
 
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new Padding(12) };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, Padding = new Padding(12) };
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -76,10 +89,16 @@ public sealed class MainForm : Form
             new Label { Text = "The EverQuest folder (dbstr_us.txt, spells_us.txt) gives AA titles and descriptions; without it AAs are saved with ids only.", AutoSize = true, ForeColor = SystemColors.GrayText },
             _saveRaw), 0, 1);
 
-        layout.Controls.Add(Row(_start, _stop, _saveAa, _openOut, _state), 0, 2);
-        layout.Controls.Add(_stats, 0, 3);
-        layout.Controls.Add(new Label { Text = "Items are saved as they are found and AAs every few seconds while they arrive. Nothing is sent anywhere -- the files stay on this computer.", AutoSize = true, ForeColor = SystemColors.GrayText, Margin = new Padding(3, 6, 3, 6) }, 0, 4);
-        layout.Controls.Add(_log, 0, 5);
+        layout.Controls.Add(Section("Website upload (optional)",
+            _upload,
+            Row(new Label { Text = "Website", Width = 60, TextAlign = ContentAlignment.MiddleLeft }, _server, new Label { Text = "Token", Width = 45, TextAlign = ContentAlignment.MiddleLeft }, _token, _testUpload),
+            new Label { Text = "Get your token on the website's capture-token page (account menu). Only items the website lacks and AA ranks are sent -- no character names, no chat, nothing else.", AutoSize = true, MaximumSize = new Size(700, 0), ForeColor = SystemColors.GrayText },
+            _uploadSaved), 0, 2);
+
+        layout.Controls.Add(Row(_start, _stop, _saveAa, _openOut, _state), 0, 3);
+        layout.Controls.Add(_stats, 0, 4);
+        layout.Controls.Add(new Label { Text = "Items are saved as they are found and AAs every few seconds while they arrive. Nothing leaves this computer unless you turn on the website upload above.", AutoSize = true, MaximumSize = new Size(700, 0), ForeColor = SystemColors.GrayText, Margin = new Padding(3, 6, 3, 6) }, 0, 5);
+        layout.Controls.Add(_log, 0, 6);
         Controls.Add(layout);
 
         _refresh.Click += (_, _) => LoadAdapters();
@@ -90,6 +109,8 @@ public sealed class MainForm : Form
         _stop.Click += (_, _) => Stop();
         _saveAa.Click += (_, _) => SaveAa();
         _openOut.Click += (_, _) => OpenOutput();
+        _testUpload.Click += async (_, _) => await TestUploadAsync();
+        _uploadSaved.Click += async (_, _) => await UploadSavedAsync();
         _liveMode.CheckedChanged += (_, _) => UpdateModeEnabled();
         _timer.Tick += (_, _) => RefreshStats();
         FormClosing += (_, _) =>
@@ -97,6 +118,7 @@ public sealed class MainForm : Form
             SaveSettings();
             Stop();
             try { _fileTask?.Wait(TimeSpan.FromSeconds(3)); } catch (AggregateException) { }   // let a cancelled file run release its files
+            try { _uploadStopTask?.Wait(TimeSpan.FromSeconds(20)); } catch (AggregateException) { }   // let the last items reach the website
         };
 
         Shown += (_, _) =>
@@ -152,6 +174,8 @@ public sealed class MainForm : Form
         _browseFile.Enabled = !live && !Busy;
         _liveMode.Enabled = _fileMode.Enabled = !Busy;
         _out.Enabled = _eq.Enabled = _browseOut.Enabled = _browseEq.Enabled = _saveRaw.Enabled = !Busy;
+        _upload.Enabled = _server.Enabled = _token.Enabled = !Busy;
+        _testUpload.Enabled = _uploadSaved.Enabled = !_uploadBusy;
         _start.Enabled = !Busy;
         _stop.Enabled = Busy;
         _start.Text = live ? "Start" : "Process";
@@ -188,6 +212,9 @@ public sealed class MainForm : Form
         _settings.EqFolder = _eq.Text.Trim();
         _settings.CaptureFile = _file.Text.Trim();
         _settings.SaveRawCapture = _saveRaw.Checked;
+        _settings.UploadEnabled = _upload.Checked;
+        _settings.UploadServer = _server.Text.Trim();
+        _settings.UploadToken = _token.Text;
         if (_adapter.SelectedItem is AdapterInfo a) _settings.Adapter = a.Display;
         _settings.Save();
     }
@@ -238,6 +265,11 @@ public sealed class MainForm : Form
         {
             var engine = NewEngine();
             engine.AutoSaveAa = true;       // live: write aa.jsonl as ranks arrive, not only on Stop
+            if (_upload.Checked && !StartUploader(engine))
+            {
+                engine.Close();
+                return;
+            }
             lock (_engineLock) { _engine = engine; _engineClosed = false; }
             _capture = new LiveCapture(adapter.Device, _settings.Filter, udp => { lock (_engineLock) _engine?.Feed(udp); });
             _capture.Failed += ex => Log("Capture error: " + ex.Message);
@@ -255,6 +287,7 @@ public sealed class MainForm : Form
             Log("Could not start capture: " + ex.Message);
             _capture?.Dispose();
             _capture = null;
+            DiscardUploader();
             lock (_engineLock)
             {
                 _engine?.Close();            // an engine that never ran must not stay selected ("Save AAs now" would use it)
@@ -284,6 +317,8 @@ public sealed class MainForm : Form
         Log("Reading " + path);
         UpdateModeEnabled();
 
+        bool uploadAfter = _upload.Checked;
+        string upServer = _server.Text, upToken = _token.Text;     // read here: the worker must not touch controls
         var token = _cancel.Token;
         _fileTask = Task.Run(() =>
         {
@@ -292,6 +327,7 @@ public sealed class MainForm : Form
                 var engine = CollectorEngine.ProcessFile(path, outDir, strings, Log, n => Volatile.Write(ref _fileProgress, n), token);
                 lock (_engineLock) { _engine = engine; _engineClosed = true; }   // ProcessFile already flushed and closed it
                 Log($"Done: {engine.Packets:N0} packets, {engine.ItemCount:N0} items, {engine.AaCount:N0} AA ranks. Saved to {outDir}");
+                if (uploadAfter) UploadFolderQuietly(outDir, upServer, upToken, token);
             }
             catch (OperationCanceledException)
             {
@@ -310,6 +346,25 @@ public sealed class MainForm : Form
                 }
             }
         });
+    }
+
+    /// <summary>On the file worker thread: sends the finished run's items and AA ranks (the whole folder; what was sent before is skipped).</summary>
+    private void UploadFolderQuietly(string folder, string server, string tokenText, CancellationToken cancel)
+    {
+        try
+        {
+            using var uploader = new CollectorUploader(server, tokenText, folder, Log);
+            var r = uploader.UploadFolderAsync(folder, cancel).GetAwaiter().GetResult();
+            Log($"Uploaded: {r.ItemsAlreadyOnSite:N0} items were already on the website; {r.ItemsAdded:N0} new items added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved.");
+        }
+        catch (OperationCanceledException)
+        {
+            Log("Upload cancelled; what is saved goes up next time (or press \"Upload saved files now\").");
+        }
+        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            Log("Upload: " + ex.Message);
+        }
     }
 
     private CollectorEngine NewEngine()
@@ -345,6 +400,7 @@ public sealed class MainForm : Form
                 }
             }
         }
+        StopUploader();
         _state.Text = "Ready.";
         UpdateModeEnabled();
     }
@@ -424,6 +480,128 @@ public sealed class MainForm : Form
         }
     }
 
+    // ---- website upload ---------------------------------------------------------------------------------------------
+
+    /// <summary>The uploader the window's settings describe, or null after telling the user what is wrong.</summary>
+    private CollectorUploader? BuildUploader(bool quietIfNotSet = false)
+    {
+        try
+        {
+            if (_token.Text.Trim().Length == 0) throw new ArgumentException("Paste your upload token first (the website's capture-token page).");
+            return new CollectorUploader(_server.Text, _token.Text, _out.Text.Trim(), Log);
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            if (!quietIfNotSet) MessageBox.Show(this, ex.Message, "Website upload", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return null;
+        }
+    }
+
+    /// <summary>Starts the background upload for a live capture. False when the settings are not usable (already explained).</summary>
+    private bool StartUploader(CollectorEngine engine)
+    {
+        DiscardUploader();               // never two loops on one engine
+        var uploader = BuildUploader();
+        if (uploader == null) return false;
+        engine.CollectForUpload = true;
+        _liveUploader = uploader;
+        string folder = _out.Text.Trim();
+        _autoUploader = new AutoUploader(uploader, () => { lock (_engineLock) return engine.TakeUpload(); }, Log,       // its own engine, never a later run's
+            ct => uploader.UploadFolderAsync(folder, ct));      // first: whatever earlier runs saved but never got sent
+        _autoUploader.Start();
+        Log($"Uploading new items and AA ranks to {uploader.Server}.");
+        return true;
+    }
+
+    /// <summary>Drops a background upload without a final round (the capture never started).</summary>
+    private void DiscardUploader()
+    {
+        var auto = _autoUploader;
+        var uploader = _liveUploader;
+        _autoUploader = null;
+        _liveUploader = null;
+        auto?.Dispose();
+        uploader?.Dispose();
+    }
+
+    /// <summary>After Stop: one last attempt to send what is waiting, off the UI thread.</summary>
+    private void StopUploader()
+    {
+        var auto = _autoUploader;
+        var uploader = _liveUploader;
+        _autoUploader = null;
+        _liveUploader = null;
+        if (auto == null) return;
+        _uploadStopTask = Task.Run(async () =>
+        {
+            try
+            {
+                bool all = await auto.StopAsync(TimeSpan.FromSeconds(15));
+                Log($"Upload finished: {auto.ItemsAdded} new items added, {auto.ItemsQueued} queued for review, {auto.AaSaved} AA ranks saved."
+                    + (all ? "" : " Some could not be sent; they are saved in the results folder and go up next time (or press \"Upload saved files now\")."));
+            }
+            catch (Exception ex)
+            {
+                Log("Upload: " + ex.Message);
+            }
+            finally
+            {
+                auto.Dispose();
+                uploader?.Dispose();
+            }
+        });
+    }
+
+    private async Task TestUploadAsync()
+    {
+        using var uploader = BuildUploader();
+        if (uploader == null) return;
+        SetUploadBusy(true);
+        try
+        {
+            var ping = await uploader.PingAsync();
+            SiteManifest? site = null;
+            try { site = await uploader.RefreshManifestAsync(); }
+            catch (UploadUnavailableException ex) { Log("Connected, but the website's list could not be pulled (" + ex.Message + "); uploads will ask the site about each item instead."); }
+            Log($"Connected to {ping.Site}. " + (ping.Trusted
+                ? "Your token adds new items and AA ranks directly."
+                : "Your token sends new items for review; AA ranks are not stored for this kind of token."));
+            if (site != null) Log($"The website has {site.ItemCount:N0} items and {site.AaCount:N0} AA ranks; only what is not there will be uploaded.");
+            MessageBox.Show(this, ping.Trusted ? "Connected. Your token adds new items and AA ranks directly." : "Connected. Your token sends new items to the review queue; AA ranks are not stored for this kind of token.", "Website upload", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException or NotSupportedException or IOException or UnauthorizedAccessException)
+        {
+            Log("Upload test: " + ex.Message);
+            MessageBox.Show(this, ex.Message, "Website upload", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        finally { SetUploadBusy(false); }
+    }
+
+    private async Task UploadSavedAsync()
+    {
+        using var uploader = BuildUploader();
+        if (uploader == null) return;
+        var folder = _out.Text.Trim();
+        SetUploadBusy(true);
+        try
+        {
+            Log($"Uploading what is saved in {folder}...");
+            var r = await Task.Run(() => uploader.UploadFolderAsync(folder));
+            Log($"Done: {r.ItemsAlreadyOnSite:N0} items already on the website, {r.ItemsChecked:N0} checked as possibly new, {r.ItemsAdded:N0} added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved.");
+        }
+        catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException or NotSupportedException or IOException or UnauthorizedAccessException)
+        {
+            Log("Upload: " + ex.Message);
+        }
+        finally { SetUploadBusy(false); }
+    }
+
+    private void SetUploadBusy(bool busy)
+    {
+        _uploadBusy = busy;
+        UpdateModeEnabled();
+    }
+
     // ---- display ----------------------------------------------------------------------------------------------------
 
     private void RefreshStats()
@@ -433,7 +611,12 @@ public sealed class MainForm : Form
             if (_engine != null)
             {
                 if (_capture != null && !_engineClosed) _engine.MaybeAutoSaveAa();     // ranks that arrived at the end of a burst
-                _stats.Text = $"Packets {_engine.Packets:N0}  |  Sessions {_engine.Sessions:N0}  |  Game packets {_engine.AppPackets:N0}  |  Items {_engine.ItemCount:N0}  |  AA ranks {_engine.AaCount:N0}  |  AA type {(_engine.AaOpcode is { } op ? "0x" + op.ToString("x") : "not seen")}";
+                if (_autoUploader is { Active: false } && _engine.CollectForUpload)
+                {
+                    _engine.CollectForUpload = false;                                  // the website refused the token: stop keeping copies of every item
+                    _engine.TakeUpload();
+                }
+                _stats.Text = $"Packets {_engine.Packets:N0}  |  Sessions {_engine.Sessions:N0}  |  Game packets {_engine.AppPackets:N0}  |  Items {_engine.ItemCount:N0}  |  AA ranks {_engine.AaCount:N0}  |  AA type {(_engine.AaOpcode is { } op ? "0x" + op.ToString("x") : "not seen")}" + UploadStats();
                 if (_capture != null && !_sessionHintShown && _engine.Packets > 0 && _engine.Sessions == 0 && DateTime.Now - _liveStarted > TimeSpan.FromSeconds(30))
                 {
                     _sessionHintShown = true;
@@ -445,6 +628,14 @@ public sealed class MainForm : Form
                 _stats.Text = $"Reading... {Volatile.Read(ref _fileProgress),12:N0} packets";
             }
         }
+    }
+
+    private string UploadStats()
+    {
+        if (_autoUploader is not { } up) return "";
+        if (!up.Active) return "  |  Upload stopped";
+        string newToSite = _liveUploader?.Manifest is { } m && _engine != null ? $"New to the site {_engine.Items.Count(i => !m.HasItem(i.Id)):N0}  |  " : "";
+        return $"  |  {newToSite}Uploaded {up.ItemsAdded + up.ItemsQueued:N0} items, {up.AaSaved:N0} AA";
     }
 
     private void Log(string message)
