@@ -92,6 +92,11 @@ The record layouts for items and AAs, the session-layer details and the list of 
 packet type come from **kauffman12's [eqaainfo](https://github.com/kauffman12/eqaainfo)**, 
 The code here is our own rewrite. Also credited on the site's Credits page.
 
+## License
+
+[MIT](LICENSE) -- free to use, copy, modify and share, as long as the copyright notice and the license text stay with it.
+The libraries it uses (such as SharpPcap) keep their own licenses, and the credit to kauffman12's eqaainfo above stands.
+
 ## What has been checked
 
 * **Real capture files:** 1,951 distinct items from `2.pcapng` (1,937 of the first 1,950 are in the site's items table
