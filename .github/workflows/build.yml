@@ -1,0 +1,130 @@
+name: Build
+
+# Builds and tests on every push and pull request. A version tag (v0.5.0) also publishes the single-file exe, has it signed
+# by SignPath (when the repository is connected to SignPath, see below) and puts it in a DRAFT release for the maintainer.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Read the version from the project
+        id: version
+        shell: bash
+        run: |
+          v=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' src/EQCollector.App/EQCollector.App.csproj | head -n1)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REF_NAME" != "v$v" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match <Version>$v</Version> in the project"
+            exit 1
+          fi
+
+      - name: Test
+        run: dotnet test -c Release
+
+      - name: Publish the single-file exe
+        run: >
+          dotnet publish src/EQCollector.App -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true
+          -o publish
+
+      - name: Keep only the exe
+        shell: bash
+        run: |
+          mkdir unsigned
+          cp publish/EQCollector.exe unsigned/EQCollector.exe
+
+      - name: Upload the unsigned exe
+        id: upload-unsigned
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: EQCollector-unsigned
+          path: unsigned/EQCollector.exe
+          if-no-files-found: error
+
+  # Signing by SignPath Foundation. It only runs for version tags, and only after the repository variable
+  # SIGNPATH_ORGANIZATION_ID is set (that happens once SignPath has approved the project). Every signing request is
+  # approved by hand in SignPath before it is signed.
+  sign:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') && vars.SIGNPATH_ORGANIZATION_ID != ''
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Find the unsigned artifact
+        id: find
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[] | select(.name=="EQCollector-unsigned") | .id')
+          echo "artifact-id=$id" >> "$GITHUB_OUTPUT"
+
+      - name: Submit the signing request to SignPath
+        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: eq-collector
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: default
+          github-artifact-id: ${{ steps.find.outputs.artifact-id }}
+          wait-for-completion-timeout-in-seconds: 86400   # a person approves it in SignPath
+          output-artifact-directory: signed
+          parameters: |
+            version: "${{ needs.build.outputs.version }}"
+
+      - name: Upload the signed exe
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: EQCollector-signed
+          path: signed/EQCollector.exe
+          if-no-files-found: error
+
+  # A draft release with the exe (signed when signing ran) and its SHA-256, for the maintainer to look over and publish.
+  release:
+    needs: [build, sign]
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.sign.result == 'success' || needs.sign.result == 'skipped') && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Get the exe
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.sign.result == 'success' && 'EQCollector-signed' || 'EQCollector-unsigned' }}
+          path: exe
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          SIGNED: ${{ needs.sign.result == 'success' }}
+        run: |
+          name="EQCollector-${VERSION}-win-x64.exe"
+          mv exe/EQCollector.exe "$name"
+          sha256sum "$name" | awk '{print $1}' > "$name.sha256"
+          if [ "$SIGNED" = "true" ]; then note="Signed by SignPath Foundation."; else note="This build is not code-signed."; fi
+          gh release create "$GITHUB_REF_NAME" "$name" "$name.sha256" --repo "$GITHUB_REPOSITORY" --draft \
+            --title "EQ Collector $VERSION" --notes "Built by GitHub Actions from this tag. $note SHA-256: $(cat "$name.sha256")"

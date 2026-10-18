@@ -92,6 +92,23 @@ The record layouts for items and AAs, the session-layer details and the list of 
 packet type come from **kauffman12's [eqaainfo](https://github.com/kauffman12/eqaainfo)**, 
 The code here is our own rewrite. Also credited on the site's Credits page.
 
+## Code signing policy
+
+Releases are built from this repository by GitHub Actions (`.github/workflows/build.yml`) and are meant to be signed with a
+free certificate from the [SignPath Foundation](https://signpath.org). Status: **the SignPath application is pending, so
+releases up to 0.4.0 are not signed yet.** Once a release is signed, this line will say so.
+
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+* **Only code from this repository is signed**, built by the automated workflow from a tagged commit -- never a build from
+  someone's own computer.
+* **Team roles:** Authors, committers and reviewers: [Teichoui](https://github.com/Teichoui). Approvers (each signing request
+  is approved by hand): [Teichoui](https://github.com/Teichoui). Everyone with signing or repository access uses
+  multi-factor authentication.
+* **Privacy policy:** this program does not send any information to other networked systems unless the user asks it to.
+  The only network connection it makes is the optional website upload described under [Website upload](#website-upload),
+  which is off by default and goes only to the website address the user enters. Capturing and decoding stay on your computer.
+
 ## License
 
 [MIT](LICENSE) -- free to use, copy, modify and share, as long as the copyright notice and the license text stay with it.
