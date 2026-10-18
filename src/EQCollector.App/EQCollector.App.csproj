@@ -2,14 +2,14 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net9.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>EQCollector</AssemblyName>
     <RootNamespace>EQCollector.App</RootNamespace>
     <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
-    <Version>0.3.4</Version>
+    <Version>0.4.0</Version>
     <ApplicationIcon>eqcollector.ico</ApplicationIcon>
     <Product>EQ Collector</Product>
     <Company>Norrath Codex</Company>
@@ -21,7 +21,6 @@
 
   <ItemGroup>
     <PackageReference Include="SharpPcap" Version="6.3.1" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
   </ItemGroup>
 
 </Project>

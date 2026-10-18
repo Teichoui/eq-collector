@@ -51,6 +51,9 @@ instead. AA ranks the site already has, with their text, are not sent.
 
 ## Build
 
+Needs the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) (the app is built for .NET 10; the published exe carries its own
+runtime, so users need nothing installed).
+
     dotnet build
     dotnet test                                   # unit tests (the real-capture tests skip themselves)
     set EQC_CAPTURE=C:\path\to\capture.pcapng
