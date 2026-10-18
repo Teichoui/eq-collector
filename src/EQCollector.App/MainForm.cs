@@ -58,6 +58,8 @@ public sealed class MainForm : Form
     public MainForm()
     {
         Text = "EQ Collector " + typeof(MainForm).Assembly.GetName().Version?.ToString(3);
+        try { Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? Application.ExecutablePath); }      // the exe's own icon (eqcollector.ico) for the title bar and taskbar
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException) { /* the default icon is fine */ }
         ClientSize = new Size(760, 760);
         MinimumSize = new Size(700, 680);
         StartPosition = FormStartPosition.CenterScreen;
