@@ -55,7 +55,7 @@ public sealed class SiteManifest
         foreach (var part in (ranges.GetString() ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries))
         {
             var ends = part.Split('-');
-            if (ends.Length is < 1 or > 2 || !long.TryParse(ends[0], out long a) || !long.TryParse(ends[^1], out long b) || b < a) return null;
+            if (ends.Length is < 1 or > 2 || !long.TryParse(ends[0], out long a) || !long.TryParse(ends[^1], out long b) || b < a || a < 0 || list.Count >= 2_000_000) return null;
             list.Add((a, b));
         }
         list.Sort();
@@ -69,7 +69,9 @@ public sealed class SiteManifest
             aaMap[rid] = text != 0;
         }
 
-        int count = doc.TryGetProperty("item_count", out var c) && c.ValueKind == JsonValueKind.Number && c.TryGetInt32(out int n) ? n : list.Sum(r => (int)(r.Item2 - r.Item1 + 1));
+        long counted = 0;
+        foreach (var (start, end) in list) counted = Math.Min(int.MaxValue, counted + Math.Min(int.MaxValue, end - start + 1));      // no overflow on absurd ranges
+        int count = doc.TryGetProperty("item_count", out var c) && c.ValueKind == JsonValueKind.Number && c.TryGetInt32(out int n) ? n : (int)counted;
         return new SiteManifest(list.ToArray(), aaMap, count, fetchedAt);
     }
 
@@ -104,13 +106,14 @@ public sealed class SiteManifest
     {
         try
         {
-            if (!File.Exists(path)) return null;
+            if (!File.Exists(path) || new FileInfo(path).Length > 32 * 1024 * 1024) return null;
             using var doc = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object
                 || !root.TryGetProperty("server", out var s) || !string.Equals(s.GetString(), server, StringComparison.OrdinalIgnoreCase)
                 || !root.TryGetProperty("fetched_at", out var f) || !f.TryGetDateTimeOffset(out var fetched)
                 || !root.TryGetProperty("manifest", out var m)) return null;
+            if (fetched > DateTimeOffset.UtcNow.AddMinutes(5)) return null;       // a date in the future would keep a stale list "fresh" forever
             return Parse(m, fetched);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or FormatException)

@@ -38,9 +38,9 @@ public sealed class EQStreamReader
     private const int AppCombined = 0x1900;
 
     private const double FragmentTimeoutSeconds = 60;
-    private const int MaxClients = 256;                       // sessions followed at once; the oldest is dropped beyond this
+    private const int MaxClients = 64;                        // sessions followed at once; the oldest is dropped beyond this
     private const int MaxFragments = 1024;                    // unfinished fragments kept per session and direction
-    private const int MaxFragmentBytes = 16 * 1024 * 1024;    // ... and their total size
+    private const int MaxFragmentBytes = 8 * 1024 * 1024;     // ... and their total size (64 sessions x 2 directions x 8 MB bounds the worst case at 1 GB)
     private const int MaxAppPacket = 16 * 1024 * 1024;        // the largest reassembled or decompressed packet accepted
 
     private sealed class Fragments

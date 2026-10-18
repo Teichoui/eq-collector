@@ -181,6 +181,7 @@ public sealed class AaFinder
     public bool Bit64 => _bit64;
 
     public ushort? Opcode => _opcode;
+    private const int MaxRecords = 200_000;
     public int Count => _records.Count;
     public IEnumerable<AaRecord> Records => _records.Values.OrderBy(r => r.AaId).ThenBy(r => r.Rank);
 
@@ -224,6 +225,7 @@ public sealed class AaFinder
         {
             var record = AaDecoder.Decode(data, _bit64);
             record.CapturedAt = time;
+            if (_records.Count >= MaxRecords && !_records.ContainsKey((record.AaId, record.Rank))) return null;     // a real table has a few thousand ranks
             _records[(record.AaId, record.Rank)] = record;
             return record;
         }

@@ -93,7 +93,7 @@ public static class PcapReader
 
     private const uint MaxFrame = 0x1000000;       // 16 MB: far more than any real frame
 
-    public static IEnumerable<Frame> ReadFrames(string path)
+    public static IEnumerable<Frame> ReadFrames(string path, Action<long>? onDamage = null)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 20, FileOptions.SequentialScan);
         using var reader = new BinaryReader(stream);
@@ -104,12 +104,14 @@ public static class PcapReader
 
         IEnumerable<Frame> frames = first == 0x0A0D0D0A ? ReadPcapNg(stream, reader) : ReadClassic(stream, reader);
         foreach (var f in frames) yield return f;
+        // The readers stop quietly at the first damaged or cut-off block; anything left unread means the file did not end cleanly.
+        if (onDamage != null && stream.Position < stream.Length) onDamage(stream.Position);
     }
 
     /// <summary>Every UDP datagram in a capture file.</summary>
-    public static IEnumerable<UdpPacket> ReadUdp(string path)
+    public static IEnumerable<UdpPacket> ReadUdp(string path, Action<long>? onDamage = null)
     {
-        foreach (var frame in ReadFrames(path))
+        foreach (var frame in ReadFrames(path, onDamage))
         {
             if (FrameParser.TryParseUdp(frame.LinkType, frame.Data, frame.Time, out var udp)) yield return udp;
         }

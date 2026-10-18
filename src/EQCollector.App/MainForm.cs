@@ -45,7 +45,9 @@ public sealed class MainForm : Form
     private PcapWriter? _raw;                   // the raw traffic of the live session (when the box is ticked)
     private readonly object _rawLock = new();
     private string _rawFolder = "";                 // read on the UI thread when capture starts; the capture thread never touches a control
-    private volatile bool _rawFailed;               // a write failed: stop trying (one log line, not one per packet)
+    private volatile bool _rawFailed;
+    private long _rawBytes;                         // written to the raw capture of this run
+    private const long MaxRawBytes = 2L * 1024 * 1024 * 1024;               // a write failed: stop trying (one log line, not one per packet)
     private DateTime _liveStarted;
     private bool _sessionHintShown;
     private bool _engineClosed;                 // the engine has been flushed and closed: Stop must not do it again
@@ -111,8 +113,11 @@ public sealed class MainForm : Form
         _stop.Click += (_, _) => Stop();
         _saveAa.Click += (_, _) => SaveAa();
         _openOut.Click += (_, _) => OpenOutput();
-        _testUpload.Click += async (_, _) => await TestUploadAsync();
-        _uploadSaved.Click += async (_, _) => await UploadSavedAsync();
+        _testUpload.Click += async (_, _) => { SaveSettings(); await TestUploadAsync(); };      // what was just typed is kept even if the app is killed later
+        _upload.CheckedChanged += (_, _) => SaveSettings();
+        _server.Leave += (_, _) => SaveSettings();
+        _token.Leave += (_, _) => SaveSettings();
+        _uploadSaved.Click += async (_, _) => { SaveSettings(); await UploadSavedAsync(); };
         _liveMode.CheckedChanged += (_, _) => UpdateModeEnabled();
         _timer.Tick += (_, _) => RefreshStats();
         FormClosing += (_, _) =>
@@ -128,7 +133,6 @@ public sealed class MainForm : Form
             LoadAdapters();
             UpdateModeEnabled();
             Log(Adapters.NpcapInstalled ? "Npcap found." : "Npcap is not installed -- live capture needs it (https://npcap.com). Capture files work without it.");
-            if (!IsAdmin()) Log("Not running as administrator -- live capture needs it (Start will offer to restart).");
         };
         _timer.Start();
     }
@@ -251,18 +255,13 @@ public sealed class MainForm : Form
             MessageBox.Show(this, "Live capture needs Npcap (free, from https://npcap.com). Install it, then try again.\n\nCapture files can be processed without it.", "Npcap not found", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        if (!IsAdmin())
-        {
-            var ask = MessageBox.Show(this, "Live capture has to run as administrator. Restart EQ Collector as administrator now?", "Administrator needed", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (ask == DialogResult.Yes) RestartAsAdmin();
-            return;
-        }
         if (_adapter.SelectedItem is not AdapterInfo adapter)
         {
             MessageBox.Show(this, "Pick the network adapter you play on.", "No adapter", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
+        string? adminHint = null;          // set when the capture could not start and administrator rights might be why
         try
         {
             var engine = NewEngine();
@@ -273,7 +272,15 @@ public sealed class MainForm : Form
                 return;
             }
             lock (_engineLock) { _engine = engine; _engineClosed = false; }
-            _capture = new LiveCapture(adapter.Device, _settings.Filter, udp => { lock (_engineLock) _engine?.Feed(udp); });
+            try
+            {
+                _capture = new LiveCapture(adapter.Device, _settings.Filter, udp => { lock (_engineLock) _engine?.Feed(udp); });      // opens the adapter and sets the filter
+            }
+            catch (Exception openEx)
+            {
+                if (!IsAdmin()) adminHint = openEx.Message;         // only a failure to open the adapter can be a permissions problem
+                throw;
+            }
             _capture.Failed += ex => Log("Capture error: " + ex.Message);
             _liveStarted = DateTime.Now;
             _sessionHintShown = false;
@@ -298,6 +305,19 @@ public sealed class MainForm : Form
             }
         }
         UpdateModeEnabled();
+
+        // Live capture does not need administrator rights when Npcap lets normal users capture (its default). If this PC's Npcap
+        // was installed with "Restrict Npcap driver's access to Administrators only", opening the adapter fails: only then is
+        // the restart offered.
+        if (adminHint != null)
+        {
+            var ask = MessageBox.Show(this,
+                "Windows did not let EQ Collector listen to the network adapter:\n\n" + adminHint +
+                "\n\nThis usually means Npcap was installed so that only administrators may capture. Restart EQ Collector as administrator now?\n\n" +
+                "(To never need this, reinstall Npcap and leave \"Restrict Npcap driver's access to Administrators only\" unticked.)",
+                "Administrator needed", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (ask == DialogResult.Yes) RestartAsAdmin();
+        }
     }
 
     private void StartFile()
@@ -458,6 +478,14 @@ public sealed class MainForm : Form
                     Log("Saving the raw traffic to " + _raw.Path);
                 }
                 _raw.Write(time, data);
+                _rawBytes += data.Length + 16;
+                if (_rawBytes > MaxRawBytes)
+                {
+                    _rawFailed = true;
+                    Log($"The raw capture reached {MaxRawBytes / (1024 * 1024 * 1024)} GB and is switched off for this run (so it cannot fill the disk); decoding carries on.");
+                    try { _raw.Dispose(); } catch (IOException) { }
+                    _raw = null;
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {

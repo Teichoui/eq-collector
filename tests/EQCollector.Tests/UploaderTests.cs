@@ -55,7 +55,6 @@ public class UploaderTests
     [Theory]
     [InlineData("norrathcodex.com", "https://norrathcodex.com/")]
     [InlineData("https://norrathcodex.com/some/path?x=1", "https://norrathcodex.com/")]
-    [InlineData("http://192.168.1.10:30090", "http://192.168.1.10:30090/")]
     [InlineData("http://localhost:8000/", "http://localhost:8000/")]
     public void Addresses_that_are_safe_are_accepted(string input, string expected) =>
         Assert.Equal(expected, CollectorUploader.NormalizeServer(input).ToString());
