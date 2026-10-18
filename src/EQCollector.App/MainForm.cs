@@ -45,7 +45,9 @@ public sealed class MainForm : Form
     private PcapWriter? _raw;                   // the raw traffic of the live session (when the box is ticked)
     private readonly object _rawLock = new();
     private string _rawFolder = "";                 // read on the UI thread when capture starts; the capture thread never touches a control
-    private volatile bool _rawFailed;               // a write failed: stop trying (one log line, not one per packet)
+    private volatile bool _rawFailed;
+    private long _rawBytes;                         // written to the raw capture of this run
+    private const long MaxRawBytes = 2L * 1024 * 1024 * 1024;               // a write failed: stop trying (one log line, not one per packet)
     private DateTime _liveStarted;
     private bool _sessionHintShown;
     private bool _engineClosed;                 // the engine has been flushed and closed: Stop must not do it again
@@ -270,7 +272,15 @@ public sealed class MainForm : Form
                 return;
             }
             lock (_engineLock) { _engine = engine; _engineClosed = false; }
-            _capture = new LiveCapture(adapter.Device, _settings.Filter, udp => { lock (_engineLock) _engine?.Feed(udp); });
+            try
+            {
+                _capture = new LiveCapture(adapter.Device, _settings.Filter, udp => { lock (_engineLock) _engine?.Feed(udp); });      // opens the adapter and sets the filter
+            }
+            catch (Exception openEx)
+            {
+                if (!IsAdmin()) adminHint = openEx.Message;         // only a failure to open the adapter can be a permissions problem
+                throw;
+            }
             _capture.Failed += ex => Log("Capture error: " + ex.Message);
             _liveStarted = DateTime.Now;
             _sessionHintShown = false;
@@ -284,7 +294,6 @@ public sealed class MainForm : Form
         catch (Exception ex)
         {
             Log("Could not start capture: " + ex.Message);
-            if (!IsAdmin()) adminHint = ex.Message;
             _capture?.Dispose();
             _capture = null;
             DiscardUploader();
@@ -469,6 +478,14 @@ public sealed class MainForm : Form
                     Log("Saving the raw traffic to " + _raw.Path);
                 }
                 _raw.Write(time, data);
+                _rawBytes += data.Length + 16;
+                if (_rawBytes > MaxRawBytes)
+                {
+                    _rawFailed = true;
+                    Log($"The raw capture reached {MaxRawBytes / (1024 * 1024 * 1024)} GB and is switched off for this run (so it cannot fill the disk); decoding carries on.");
+                    try { _raw.Dispose(); } catch (IOException) { }
+                    _raw = null;
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {

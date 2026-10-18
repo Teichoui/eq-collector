@@ -101,8 +101,9 @@ public sealed class CollectorUploader : IDisposable
     internal static void ForgetSharedStates() { lock (SharedStates) SharedStates.Clear(); }
 
     /// <summary>
-    /// The address must be https, so the token is never sent in the clear -- except to this computer or a private network
-    /// address (a test site on the LAN). Returns the site root, without a path.
+    /// The address must be https, so the token is never sent in the clear -- except to this computer. A test site on a private
+    /// network address may use http only when the environment variable EQC_ALLOW_INSECURE_LAN=1 is set (a private address does
+    /// not make a network trustworthy: guest and hotel networks hand them out too). Returns the site root, without a path.
     /// </summary>
     public static Uri NormalizeServer(string text)
     {
@@ -112,7 +113,7 @@ public sealed class CollectorUploader : IDisposable
         if (!Uri.TryCreate(text, UriKind.Absolute, out var uri) || (uri.Scheme != "https" && uri.Scheme != "http"))
             throw new ArgumentException("That is not a web address.");
         if (uri.Scheme == "http" && !IsLocalHost(uri.Host))
-            throw new ArgumentException("Use https:// -- the token must not be sent unencrypted over the internet.");
+            throw new ArgumentException("Use https:// -- the token must not be sent unencrypted over a network.");
         return new Uri(uri.GetLeftPart(UriPartial.Authority));
     }
 
@@ -123,6 +124,7 @@ public sealed class CollectorUploader : IDisposable
         if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
         if (!IPAddress.TryParse(host, out var ip)) return false;
         if (IPAddress.IsLoopback(ip)) return true;
+        if (Environment.GetEnvironmentVariable("EQC_ALLOW_INSECURE_LAN") != "1") return false;     // explicit opt-in for a LAN test site
         var b = ip.GetAddressBytes();
         return ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
             && (b[0] == 10 || (b[0] == 172 && b[1] >= 16 && b[1] <= 31) || (b[0] == 192 && b[1] == 168));
@@ -402,7 +404,7 @@ public sealed class CollectorUploader : IDisposable
             HttpResponseMessage response;
             try
             {
-                response = await _http.SendAsync(make(), ct);
+                response = await _http.SendAsync(make(), HttpCompletionOption.ResponseHeadersRead, ct);
             }
             catch (HttpRequestException ex)
             {
@@ -435,14 +437,36 @@ public sealed class CollectorUploader : IDisposable
         }
     }
 
+    private const int MaxResponseBytes = 8 * 1024 * 1024;      // the website's answers are a few KB (the list is ~90 KB)
+
+    /// <summary>Reads a response body without ever holding more than <paramref name="max"/> bytes (also after decompression).</summary>
+    private static async Task<byte[]> ReadBounded(HttpContent content, int max, bool truncate, CancellationToken ct = default)
+    {
+        using var stream = await content.ReadAsStreamAsync(ct);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[8192];
+        int n;
+        while ((n = await stream.ReadAsync(chunk, ct)) > 0)
+        {
+            if (buffer.Length + n > max)
+            {
+                if (!truncate) throw new UploadUnavailableException("The website's answer was much larger than expected.");
+                buffer.Write(chunk, 0, (int)(max - buffer.Length));
+                break;
+            }
+            buffer.Write(chunk, 0, n);
+        }
+        return buffer.ToArray();
+    }
+
     private static async Task<string> SafeBody(HttpResponseMessage response)
     {
         try
         {
-            var text = await response.Content.ReadAsStringAsync();
+            var text = Encoding.UTF8.GetString(await ReadBounded(response.Content, 1024, truncate: true));
             return text.Length > 200 ? text[..200] : text;
         }
-        catch (Exception ex) when (ex is HttpRequestException or IOException)
+        catch (Exception ex) when (ex is HttpRequestException or IOException or UploadUnavailableException)
         {
             return "";
         }
@@ -452,8 +476,7 @@ public sealed class CollectorUploader : IDisposable
     {
         try
         {
-            using var stream = await response.Content.ReadAsStreamAsync(ct);
-            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+            using var doc = JsonDocument.Parse(await ReadBounded(response.Content, MaxResponseBytes, truncate: false, ct));
             return doc.RootElement.Clone();
         }
         catch (JsonException ex)
@@ -537,11 +560,16 @@ public sealed class CollectorUploader : IDisposable
         {
             try
             {
-                if (File.Exists(path))
+                if (File.Exists(path) && new FileInfo(path).Length < 64 * 1024 * 1024)
                 {
                     var s = JsonSerializer.Deserialize<UploadState>(File.ReadAllText(path));
                     if (s != null && string.Equals(s.Server, server, StringComparison.OrdinalIgnoreCase))
                     {
+                        s.Items ??= new();                     // a damaged or hand-edited file may hold nulls
+                        s.RejectedHashes ??= new();
+                        s.Aa ??= new();
+                        s.Declined ??= new();
+                        s.DeclinedFor ??= "";
                         if (s.Version < 2)
                         {
                             s.Declined.Clear();                // refused before the website could queue AA ranks: offer them again

@@ -26,8 +26,11 @@ public sealed class CollectorEngine : IDisposable
     private readonly HashSet<long> _onDisk = new();                   // ids already in items.jsonl
     private readonly Action<string>? _log;
     private readonly Dictionary<(uint AaId, uint Rank), string> _aaOnDisk = new();   // lines already in aa.jsonl
-    private bool _partialToRemove;                 // an earlier aa.partial.jsonl was merged in; delete it once aa.jsonl is written
     private bool _aaLoadFailed;                    // aa.jsonl could not be read completely: it must not be replaced
+    private string _fallbackName = "aa.partial.jsonl";   // where this run's ranks go while aa.jsonl cannot be read
+    private readonly List<string> _partialFiles = new();  // fallback files merged in; deleted once aa.jsonl has been written
+    private bool _aaDamaged;                          // aa.jsonl held a line that is not valid JSON (it is dropped on the next write)
+    private bool _aaBackupMade;
     private StreamWriter? _itemsFile;
     private bool _writingFailed;
     private bool _aaDirty;                         // ranks found since the file was last written
@@ -88,45 +91,63 @@ public sealed class CollectorEngine : IDisposable
     private void LoadExistingAa()
     {
         var path = Path.Combine(OutputFolder, "aa.jsonl");
-        var partialPath = Path.Combine(OutputFolder, "aa.partial.jsonl");
         try
         {
             if (File.Exists(path))
             {
-                var loaded = ReadAaLines(path);                           // only kept when the whole file was read
+                var loaded = ReadAaLines(path, out int damaged);              // only kept when the whole file was read
                 foreach (var (key, line) in loaded) _aaOnDisk[key] = line;
+                _aaDamaged = damaged > 0;
+                if (damaged > 0) Report($"{damaged:N0} damaged line(s) in aa.jsonl are left out; the original is copied to a .damaged file before it is rewritten.");
                 if (_aaOnDisk.Count > 0) _log?.Invoke($"{_aaOnDisk.Count:N0} AA ranks are already in aa.jsonl; this run's ranks will be added to them.");
             }
         }
-        catch (IOException ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             // A partial read must never be written back over the original, so aa.jsonl is left alone and this run's
-            // ranks go to aa.partial.jsonl instead.
+            // ranks go to a fallback file instead.
             _aaLoadFailed = true;
-            Report("Could not read the existing aa.jsonl completely: " + ex.Message + ". It will not be replaced; this run's ranks are saved to aa.partial.jsonl.");
+            _aaOnDisk.Clear();
+            try
+            {
+                // Fallback files left by earlier failed runs keep what they have: this run's ranks are added to them, never
+                // written over them. (A fallback file that cannot be read makes this run write a file of its own.)
+                foreach (var file in PartialFiles()) foreach (var (key, line) in ReadAaLines(file, out _)) _aaOnDisk[key] = line;
+            }
+            catch (Exception inner) when (inner is IOException or UnauthorizedAccessException)
+            {
+                _aaOnDisk.Clear();
+                _fallbackName = $"aa.partial-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..6]}.jsonl";
+            }
+
+            Report("Could not read the existing aa.jsonl completely: " + ex.Message + ". It will not be replaced; this run's ranks are saved to " + _fallbackName + ".");
             return;
         }
 
-        // aa.jsonl can be written again, so a fallback file left by an earlier run is folded in (its ranks were captured
-        // later than what aa.jsonl held then) and removed once aa.jsonl has been written.
-        try
+        // aa.jsonl can be written again, so fallback files left by earlier runs are folded in (their ranks were captured later
+        // than what aa.jsonl held then) and removed once aa.jsonl has been written.
+        foreach (var file in PartialFiles())
         {
-            if (File.Exists(partialPath))
+            try
             {
-                var fromPartial = ReadAaLines(partialPath);
+                var fromPartial = ReadAaLines(file, out _);
                 foreach (var (key, line) in fromPartial) _aaOnDisk[key] = line;
-                _partialToRemove = true;
-                _log?.Invoke($"{fromPartial.Count:N0} AA ranks from an earlier aa.partial.jsonl will be merged into aa.jsonl.");
+                _partialFiles.Add(file);
+                _log?.Invoke($"{fromPartial.Count:N0} AA ranks from an earlier {Path.GetFileName(file)} will be merged into aa.jsonl.");
             }
-        }
-        catch (IOException)
-        {
-            // left alone: it is merged next time
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // left alone: it is merged next time
+            }
         }
     }
 
-    private static Dictionary<(uint AaId, uint Rank), string> ReadAaLines(string path)
+    /// <summary>Every fallback file in the results folder (aa.partial.jsonl and the uniquely named ones), oldest first.</summary>
+    private IEnumerable<string> PartialFiles() => Directory.EnumerateFiles(OutputFolder, "aa.partial*.jsonl").OrderBy(File.GetLastWriteTimeUtc).ToList();
+
+    private static Dictionary<(uint AaId, uint Rank), string> ReadAaLines(string path, out int damaged)
     {
+        damaged = 0;
         var loaded = new Dictionary<(uint AaId, uint Rank), string>();
         foreach (var line in File.ReadLines(path))
         {
@@ -139,9 +160,11 @@ public sealed class CollectorEngine : IDisposable
                     && root.TryGetProperty("aa_id", out var id) && id.TryGetUInt32(out var aaId)
                     && root.TryGetProperty("rank", out var rank) && rank.TryGetUInt32(out var r))
                     loaded[(aaId, r)] = line;
+                else damaged++;
             }
             catch (JsonException)
             {
+                damaged++;
             }
         }
         return loaded;
@@ -187,8 +210,13 @@ public sealed class CollectorEngine : IDisposable
         {
             foreach (var found in ItemFinder.Find(p.Data))
             {
+                if (_items.Count >= MaxItems)
+                {
+                    if (!_itemCapReported) { _itemCapReported = true; Report($"More than {MaxItems:N0} different items: no more are kept this run (a real capture holds a few thousand)."); }
+                    continue;
+                }
                 if (!_items.TryAdd(found.Item.Id, found.Item)) continue;
-                if (_onDisk.Add(found.Item.Id)) AppendItem(found.Item);
+                if (!_onDisk.Contains(found.Item.Id) && AppendItem(found.Item)) _onDisk.Add(found.Item.Id);     // remembered as saved only once it was written
                 if (CollectForUpload) _uploadItems.Add(ItemToDictionary(found.Item).ToDictionary(kv => kv.Key, kv => (object?)kv.Value));
                 ItemFound?.Invoke(found.Item);
             }
@@ -241,18 +269,46 @@ public sealed class CollectorEngine : IDisposable
         if (FlushAa() == 0) _aaNextAutoSave = now + (long)(AutoSaveRetry.TotalSeconds * System.Diagnostics.Stopwatch.Frequency);
     }
 
-    private void AppendItem(ItemRecord item)
+    private const int MaxItems = 500_000;
+    private bool _itemCapReported;
+
+    /// <summary>Appends one item to items.jsonl; false when it was not written.</summary>
+    private bool AppendItem(ItemRecord item)
     {
-        if (_writingFailed) return;
+        if (_writingFailed) return false;
+        string line;
         try
         {
-            _itemsFile ??= new StreamWriter(ItemsPath, append: true, new UTF8Encoding(false)) { AutoFlush = true };
-            _itemsFile.WriteLine(JsonSerializer.Serialize(ItemToDictionary(item), JsonOptions));
+            line = JsonSerializer.Serialize(ItemToDictionary(item), JsonOptions);        // first: a record that cannot be serialised (NaN) is skipped, not half-written
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or NotSupportedException)
+        {
+            Report($"Item {item.Id} could not be saved ({ex.Message}); skipped.");
+            return false;
+        }
+
+        try
+        {
+            if (_itemsFile == null)
+            {
+                bool needsNewline = false;
+                if (File.Exists(ItemsPath) && new FileInfo(ItemsPath).Length > 0)
+                {
+                    using var probe = new FileStream(ItemsPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    probe.Seek(-1, SeekOrigin.End);
+                    needsNewline = probe.ReadByte() != '\n';                               // an earlier run was cut off mid-line: do not glue this record to it
+                }
+                _itemsFile = new StreamWriter(ItemsPath, append: true, new UTF8Encoding(false)) { AutoFlush = true };
+                if (needsNewline) _itemsFile.Write('\n');
+            }
+            _itemsFile.WriteLine(line);
+            return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException)
         {
             _writingFailed = true;
             Report($"Cannot write {ItemsPath}: {ex.Message}. Items are still counted but no longer saved.");
+            return false;
         }
     }
 
@@ -293,7 +349,7 @@ public sealed class CollectorEngine : IDisposable
     /// </summary>
     public int FlushAa()
     {
-        var path = Path.Combine(OutputFolder, _aaLoadFailed ? "aa.partial.jsonl" : "aa.jsonl");
+        var path = Path.Combine(OutputFolder, _aaLoadFailed ? _fallbackName : "aa.jsonl");
         var temp = path + ".tmp";
 
         var merged = new Dictionary<(uint AaId, uint Rank), string>(_aaOnDisk);
@@ -306,11 +362,20 @@ public sealed class CollectorEngine : IDisposable
             {
                 foreach (var key in merged.Keys.OrderBy(k => k.AaId).ThenBy(k => k.Rank)) w.WriteLine(merged[key]);
             }
-            File.Move(temp, path, overwrite: true);
-            if (_partialToRemove && !_aaLoadFailed)
+            if (_aaDamaged && !_aaBackupMade && !_aaLoadFailed && File.Exists(path))
             {
-                try { File.Delete(Path.Combine(OutputFolder, "aa.partial.jsonl")); _partialToRemove = false; }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* merged again next time */ }
+                try { File.Copy(path, path + $".damaged-{DateTime.Now:yyyyMMdd-HHmmss}", overwrite: false); }       // the lines that are about to be dropped
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* not worth stopping the save */ }
+                _aaBackupMade = true;
+            }
+            File.Move(temp, path, overwrite: true);
+            if (!_aaLoadFailed)
+            {
+                foreach (var file in _partialFiles.ToList())
+                {
+                    try { File.Delete(file); _partialFiles.Remove(file); }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* merged again next time */ }
+                }
             }
             foreach (var (key, line) in merged) _aaOnDisk[key] = line;
             _aaDirty = false;
@@ -365,7 +430,8 @@ public sealed class CollectorEngine : IDisposable
         var engine = new CollectorEngine(outputFolder, strings, log, opcode, bit64);
         try
         {
-            foreach (var udp in PcapReader.ReadUdp(capturePath))
+            foreach (var udp in PcapReader.ReadUdp(capturePath, pos =>
+                log?.Invoke($"WARNING: the capture file is damaged or cut short at byte {pos:N0}; these results cover only what came before that point.")))
             {
                 cancel.ThrowIfCancellationRequested();
                 engine.Feed(udp);

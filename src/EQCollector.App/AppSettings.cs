@@ -46,11 +46,22 @@ public sealed class AppSettings
 
     public static AppSettings Load()
     {
+        // settings.json, or the copy kept from before the last save if that one is damaged (a crash mid-write)
+        foreach (var file in new[] { FilePath, FilePath + ".bak" })
+        {
+            var loaded = TryLoad(file);
+            if (loaded != null) return loaded;
+        }
+        return new AppSettings { EqFolder = FindEqFolder() };
+    }
+
+    private static AppSettings? TryLoad(string file)
+    {
         try
         {
-            if (File.Exists(FilePath))
+            if (File.Exists(file) && new FileInfo(file).Length < 1024 * 1024)
             {
-                var loaded = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath)) ?? new AppSettings();
+                var loaded = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(file)) ?? new AppSettings();
                 loaded.UploadServer ??= new AppSettings().UploadServer;      // a hand-edited file may hold nulls
                 loaded.UploadTokenProtected ??= "";
                 loaded.OutputFolder ??= new AppSettings().OutputFolder;
@@ -64,8 +75,7 @@ public sealed class AppSettings
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
         {
         }
-        var s = new AppSettings { EqFolder = FindEqFolder() };
-        return s;
+        return null;
     }
 
     public void Save()
@@ -73,7 +83,11 @@ public sealed class AppSettings
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            // written to a temporary file and swapped in, so a crash or a full disk can never leave a half-written settings.json
+            var temp = FilePath + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            if (File.Exists(FilePath)) File.Replace(temp, FilePath, FilePath + ".bak");
+            else File.Move(temp, FilePath);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

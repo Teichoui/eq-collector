@@ -564,6 +564,28 @@ public class RobustnessTests
     }
 
     [Fact]
+    public void An_existing_fallback_file_is_kept_and_added_to_when_aa_jsonl_still_cannot_be_read()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var main = Path.Combine(dir, "aa.jsonl");
+        var partial = Path.Combine(dir, "aa.partial.jsonl");
+        File.WriteAllText(main, "{\"aa_id\":1,\"rank\":1,\"title\":\"A1\"}\n");
+        File.WriteAllText(partial, "{\"aa_id\":7,\"rank\":3,\"title\":\"from the first failed run\"}\n");
+        try
+        {
+            using (var locked = new FileStream(main, FileMode.Open, FileAccess.Read, FileShare.None))        // reading aa.jsonl fails again
+            using (var engine = new CollectorEngine(dir))
+            {
+                Assert.Equal(1, engine.FlushAa());                                                            // the first run's rank is carried, not dropped
+            }
+            Assert.Contains("from the first failed run", File.ReadAllText(partial));
+            Assert.Contains("\"A1\"", File.ReadAllText(main));                                                // the original is untouched
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void Flushing_AAs_never_shrinks_or_empties_an_existing_aa_file()
     {
         var dir = Path.Combine(Path.GetTempPath(), "eqc-test-" + Guid.NewGuid().ToString("N"));

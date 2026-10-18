@@ -9,7 +9,8 @@ Results are written as JSON lines in a folder on your computer. Nothing is sent 
 
 ## Run it
 
-`publish\EQCollector.exe` (one file, about 48 MB, nothing else to install except Npcap for live capture).
+The newest `publish-x.y.z\EQCollector.exe` (for example `publish-0.3.4\EQCollector.exe`; one file, about 48 MB, nothing else to
+install except Npcap for live capture). The window title shows the version.
 
 * **Capture file** -- pick a `.pcap` / `.pcapng`, set the EverQuest folder (for AA titles and descriptions), press
   *Process*. A 258 MB capture takes about 10 seconds. No Npcap or administrator needed.
