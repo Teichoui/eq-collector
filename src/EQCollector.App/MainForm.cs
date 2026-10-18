@@ -111,8 +111,11 @@ public sealed class MainForm : Form
         _stop.Click += (_, _) => Stop();
         _saveAa.Click += (_, _) => SaveAa();
         _openOut.Click += (_, _) => OpenOutput();
-        _testUpload.Click += async (_, _) => await TestUploadAsync();
-        _uploadSaved.Click += async (_, _) => await UploadSavedAsync();
+        _testUpload.Click += async (_, _) => { SaveSettings(); await TestUploadAsync(); };      // what was just typed is kept even if the app is killed later
+        _upload.CheckedChanged += (_, _) => SaveSettings();
+        _server.Leave += (_, _) => SaveSettings();
+        _token.Leave += (_, _) => SaveSettings();
+        _uploadSaved.Click += async (_, _) => { SaveSettings(); await UploadSavedAsync(); };
         _liveMode.CheckedChanged += (_, _) => UpdateModeEnabled();
         _timer.Tick += (_, _) => RefreshStats();
         FormClosing += (_, _) =>
