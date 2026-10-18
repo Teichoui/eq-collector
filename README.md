@@ -13,8 +13,9 @@ Results are written as JSON lines in a folder on your computer. Nothing is sent 
 
 * **Capture file** -- pick a `.pcap` / `.pcapng`, set the EverQuest folder (for AA titles and descriptions), press
   *Process*. A 258 MB capture takes about 10 seconds. No Npcap or administrator needed.
-* **Live capture** -- needs [Npcap](https://npcap.com) installed and EQ Collector running as administrator (it offers
-  to restart itself). Pick your adapter (the one with the default gateway is chosen), press *Start*, then play: zone,
+* **Live capture** -- needs [Npcap](https://npcap.com) installed; no administrator rights are needed as long as Npcap was
+  installed with *"Restrict Npcap driver's access to Administrators only"* left **unticked** (the default). If Windows
+  refuses to open the adapter, EQ Collector says so and offers to restart itself as administrator. Pick your adapter (the one with the default gateway is chosen), press *Start*, then play: zone,
   look at / loot / shop for items, and buy or reset AAs (the server sends the AA table then).
 * **From a script** -- `EQCollector.exe --file capture.pcapng --out folder --eq "C:\path\to\EverQuest"`
 

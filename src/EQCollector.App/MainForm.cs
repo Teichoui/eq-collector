@@ -128,7 +128,6 @@ public sealed class MainForm : Form
             LoadAdapters();
             UpdateModeEnabled();
             Log(Adapters.NpcapInstalled ? "Npcap found." : "Npcap is not installed -- live capture needs it (https://npcap.com). Capture files work without it.");
-            if (!IsAdmin()) Log("Not running as administrator -- live capture needs it (Start will offer to restart).");
         };
         _timer.Start();
     }
@@ -251,18 +250,13 @@ public sealed class MainForm : Form
             MessageBox.Show(this, "Live capture needs Npcap (free, from https://npcap.com). Install it, then try again.\n\nCapture files can be processed without it.", "Npcap not found", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        if (!IsAdmin())
-        {
-            var ask = MessageBox.Show(this, "Live capture has to run as administrator. Restart EQ Collector as administrator now?", "Administrator needed", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (ask == DialogResult.Yes) RestartAsAdmin();
-            return;
-        }
         if (_adapter.SelectedItem is not AdapterInfo adapter)
         {
             MessageBox.Show(this, "Pick the network adapter you play on.", "No adapter", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
+        string? adminHint = null;          // set when the capture could not start and administrator rights might be why
         try
         {
             var engine = NewEngine();
@@ -287,6 +281,7 @@ public sealed class MainForm : Form
         catch (Exception ex)
         {
             Log("Could not start capture: " + ex.Message);
+            if (!IsAdmin()) adminHint = ex.Message;
             _capture?.Dispose();
             _capture = null;
             DiscardUploader();
@@ -298,6 +293,19 @@ public sealed class MainForm : Form
             }
         }
         UpdateModeEnabled();
+
+        // Live capture does not need administrator rights when Npcap lets normal users capture (its default). If this PC's Npcap
+        // was installed with "Restrict Npcap driver's access to Administrators only", opening the adapter fails: only then is
+        // the restart offered.
+        if (adminHint != null)
+        {
+            var ask = MessageBox.Show(this,
+                "Windows did not let EQ Collector listen to the network adapter:\n\n" + adminHint +
+                "\n\nThis usually means Npcap was installed so that only administrators may capture. Restart EQ Collector as administrator now?\n\n" +
+                "(To never need this, reinstall Npcap and leave \"Restrict Npcap driver's access to Administrators only\" unticked.)",
+                "Administrator needed", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (ask == DialogResult.Yes) RestartAsAdmin();
+        }
     }
 
     private void StartFile()
