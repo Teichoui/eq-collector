@@ -355,7 +355,7 @@ public sealed class MainForm : Form
         {
             using var uploader = new CollectorUploader(server, tokenText, folder, Log);
             var r = uploader.UploadFolderAsync(folder, cancel).GetAwaiter().GetResult();
-            Log($"Uploaded: {r.ItemsAlreadyOnSite:N0} items were already on the website; {r.ItemsAdded:N0} new items added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved.");
+            Log($"Uploaded: {r.ItemsAlreadyOnSite:N0} items were already on the website; {r.ItemsAdded:N0} new items added, {r.ItemsQueued:N0} items and {r.AaQueued:N0} AA ranks queued for review, {r.AaSaved:N0} AA ranks saved.");
         }
         catch (OperationCanceledException)
         {
@@ -537,7 +537,7 @@ public sealed class MainForm : Form
             try
             {
                 bool all = await auto.StopAsync(TimeSpan.FromSeconds(15));
-                Log($"Upload finished: {auto.ItemsAdded} new items added, {auto.ItemsQueued} queued for review, {auto.AaSaved} AA ranks saved."
+                Log($"Upload finished: {auto.ItemsAdded} new items added, {auto.ItemsQueued} items and {auto.AaQueued} AA ranks queued for review, {auto.AaSaved} AA ranks saved."
                     + (all ? "" : " Some could not be sent; they are saved in the results folder and go up next time (or press \"Upload saved files now\")."));
             }
             catch (Exception ex)
@@ -565,9 +565,9 @@ public sealed class MainForm : Form
             catch (UploadUnavailableException ex) { Log("Connected, but the website's list could not be pulled (" + ex.Message + "); uploads will ask the site about each item instead."); }
             Log($"Connected to {ping.Site}. " + (ping.Trusted
                 ? "Your token adds new items and AA ranks directly."
-                : "Your token sends new items for review; AA ranks are not stored for this kind of token."));
+                : "Everything you upload goes into the website's review queue and is added only after a person approves it."));
             if (site != null) Log($"The website has {site.ItemCount:N0} items and {site.AaCount:N0} AA ranks; only what is not there will be uploaded.");
-            MessageBox.Show(this, ping.Trusted ? "Connected. Your token adds new items and AA ranks directly." : "Connected. Your token sends new items to the review queue; AA ranks are not stored for this kind of token.", "Website upload", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, ping.Trusted ? "Connected. Your token adds new items and AA ranks directly." : "Connected. Everything you upload goes into the website's review queue and is added only after a person approves it.", "Website upload", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException or NotSupportedException or IOException or UnauthorizedAccessException)
         {
@@ -587,7 +587,7 @@ public sealed class MainForm : Form
         {
             Log($"Uploading what is saved in {folder}...");
             var r = await Task.Run(() => uploader.UploadFolderAsync(folder));
-            Log($"Done: {r.ItemsAlreadyOnSite:N0} items already on the website, {r.ItemsChecked:N0} checked as possibly new, {r.ItemsAdded:N0} added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved.");
+            Log($"Done: {r.ItemsAlreadyOnSite:N0} items already on the website, {r.ItemsChecked:N0} checked as possibly new, {r.ItemsAdded:N0} added, {r.ItemsQueued:N0} items and {r.AaQueued:N0} AA ranks queued for review, {r.AaSaved:N0} AA ranks saved.");
         }
         catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException or NotSupportedException or IOException or UnauthorizedAccessException)
         {
@@ -635,7 +635,7 @@ public sealed class MainForm : Form
         if (_autoUploader is not { } up) return "";
         if (!up.Active) return "  |  Upload stopped";
         string newToSite = _liveUploader?.Manifest is { } m && _engine != null ? $"New to the site {_engine.Items.Count(i => !m.HasItem(i.Id)):N0}  |  " : "";
-        return $"  |  {newToSite}Uploaded {up.ItemsAdded + up.ItemsQueued:N0} items, {up.AaSaved:N0} AA";
+        return $"  |  {newToSite}Sent {up.ItemsAdded + up.ItemsQueued:N0} items, {up.AaSaved + up.AaQueued:N0} AA";
     }
 
     private void Log(string message)

@@ -56,7 +56,7 @@ internal static class Program
         {
             using var uploader = new CollectorUploader(server, token, folder, Console.WriteLine);
             var r = uploader.UploadFolderAsync(folder).GetAwaiter().GetResult();
-            Console.WriteLine($"Uploaded: {r.ItemsAlreadyOnSite:N0} items already on the website, {r.ItemsChecked:N0} checked as possibly new, {r.ItemsAdded:N0} added, {r.ItemsQueued:N0} queued for review, {r.AaSaved:N0} AA ranks saved, {r.Rejected:N0} rejected.");
+            Console.WriteLine($"Uploaded: {r.ItemsAlreadyOnSite:N0} items already on the website, {r.ItemsChecked:N0} checked as possibly new, {r.ItemsAdded:N0} added, {r.ItemsQueued:N0} items and {r.AaQueued:N0} AA ranks queued for review, {r.AaSaved:N0} AA ranks saved, {r.Rejected:N0} rejected.");
             return 0;
         }
         catch (Exception ex) when (ex is UploadAuthException or UploadUnavailableException or ArgumentException or IOException or UnauthorizedAccessException)

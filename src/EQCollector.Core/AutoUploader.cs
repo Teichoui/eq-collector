@@ -19,7 +19,7 @@ public sealed class AutoUploader : IDisposable
     private readonly List<IReadOnlyDictionary<string, object?>> _items = new();
     private List<IReadOnlyDictionary<string, object?>>? _aa;
     private Task? _loop;
-    private int _itemsAdded, _itemsQueued, _aaSaved;
+    private int _itemsAdded, _itemsQueued, _aaSaved, _aaQueued;
     private volatile bool _stopped;
 
     /// <summary>How often a round runs when all is well.</summary>
@@ -28,6 +28,7 @@ public sealed class AutoUploader : IDisposable
     public int ItemsAdded => Volatile.Read(ref _itemsAdded);
     public int ItemsQueued => Volatile.Read(ref _itemsQueued);
     public int AaSaved => Volatile.Read(ref _aaSaved);
+    public int AaQueued => Volatile.Read(ref _aaQueued);
 
     /// <summary>False once the website refused the token.</summary>
     public bool Active => !_stopped;
@@ -91,6 +92,7 @@ public sealed class AutoUploader : IDisposable
             Interlocked.Add(ref _itemsAdded, summary.ItemsAdded);
             Interlocked.Add(ref _itemsQueued, summary.ItemsQueued);
             Interlocked.Add(ref _aaSaved, summary.AaSaved);
+            Interlocked.Add(ref _aaQueued, summary.AaQueued);
             _items.Clear();
             _aa = null;
             return Outcome.Ok;

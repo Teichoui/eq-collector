@@ -19,7 +19,7 @@ public sealed class UploadUnavailableException : Exception
 }
 
 /// <summary>What one upload round did.</summary>
-public sealed record UploadSummary(int ItemsChecked, int ItemsSent, int ItemsAdded, int ItemsQueued, int AaSent, int AaSaved, int Rejected, int ItemsAlreadyOnSite = 0);
+public sealed record UploadSummary(int ItemsChecked, int ItemsSent, int ItemsAdded, int ItemsQueued, int AaSent, int AaSaved, int Rejected, int ItemsAlreadyOnSite = 0, int AaQueued = 0);
 
 /// <summary>What the server said about the token.</summary>
 public sealed record PingResult(bool Ok, bool Trusted, string Site);
@@ -188,7 +188,7 @@ public sealed class CollectorUploader : IDisposable
     private async Task<UploadSummary> UploadCoreAsync(IReadOnlyCollection<IReadOnlyDictionary<string, object?>> items,
         IReadOnlyCollection<IReadOnlyDictionary<string, object?>> aa, CancellationToken ct)
     {
-        int checkedCount = 0, sent = 0, added = 0, queued = 0, aaSent = 0, aaSaved = 0, rejected = 0, onSite = 0;
+        int checkedCount = 0, sent = 0, added = 0, queued = 0, aaSent = 0, aaSaved = 0, aaQueued = 0, rejected = 0, onSite = 0;
         var manifest = Manifest;
 
         // ---- items: ask which ids the site lacks, send only those --------------------------------------------------
@@ -256,12 +256,13 @@ public sealed class CollectorUploader : IDisposable
         {
             using var response = await SendAsync(() => JsonRequest("api/collector/upload", new Dictionary<string, object?> { ["aa"] = batch.Select(b => b.Record).ToList() }), ct);
             var doc = await ReadJson(response, ct);
-            RequireCounters(doc, "aa_saved", "aa_skipped");
+            RequireCounters(doc, "aa_saved", "aa_skipped");          // aa_queued is newer: absent from an older website
             aaSent += batch.Length;
             aaSaved += Int(doc, "aa_saved");
+            aaQueued += Int(doc, "aa_queued");
             // Ranks the server declined (a non-trusted token) are remembered for this token only, or every round would send
             // them again -- and a trusted token later still sends them.
-            bool declined = Int(doc, "aa_saved") == 0 && Int(doc, "aa_skipped") > 0;     // the whole batch refused (a token that may not store AAs)
+            bool declined = Int(doc, "aa_saved") == 0 && Int(doc, "aa_queued") == 0 && Int(doc, "aa_skipped") > 0;     // the whole batch refused (a token that may not store AAs)
             foreach (var b in batch)
             {
                 if (declined) _state.Declined[b.Id] = b.Hash;
@@ -271,8 +272,8 @@ public sealed class CollectorUploader : IDisposable
         }
 
         _state.Save(_statePath);
-        var summary = new UploadSummary(checkedCount, sent, added, queued, aaSent, aaSaved, rejected, onSite);
-        if (sent > 0 || aaSent > 0) _log?.Invoke($"Uploaded: {added} new items added, {queued} items queued for review, {aaSaved} AA ranks saved.");
+        var summary = new UploadSummary(checkedCount, sent, added, queued, aaSent, aaSaved, rejected, onSite, aaQueued);
+        if (sent > 0 || aaSent > 0) _log?.Invoke($"Uploaded: {added} new items added, {queued} items and {aaQueued} AA ranks queued for review, {aaSaved} AA ranks saved.");
         return summary;
     }
 
@@ -463,10 +464,10 @@ public sealed class CollectorUploader : IDisposable
 
     // ---- helpers ----------------------------------------------------------------------------------------------------
 
-    /// <summary>The website always answers an upload with its counters; a reply without them (a proxy, an old server) is not an acknowledgement.</summary>
+    /// <summary>The website always answers an upload with all of its counters; a reply missing any of them (a proxy, an old server, a half answer) is not an acknowledgement.</summary>
     private static void RequireCounters(JsonElement doc, params string[] names)
     {
-        if (doc.ValueKind != JsonValueKind.Object || !names.Any(n => doc.TryGetProperty(n, out _))) throw Unexpected();
+        if (doc.ValueKind != JsonValueKind.Object || !names.All(n => doc.TryGetProperty(n, out _))) throw Unexpected();
     }
 
     private static bool HasText(IReadOnlyDictionary<string, object?> rank)
@@ -530,6 +531,7 @@ public sealed class CollectorUploader : IDisposable
         public Dictionary<long, string> Aa { get; set; } = new();
         public Dictionary<long, string> Declined { get; set; } = new();     // AA ranks the server would not store for DeclinedFor's token
         public string DeclinedFor { get; set; } = "";
+        public int Version { get; set; }                                    // 2 = the website can queue AA ranks, so "declined" from before is stale
 
         public static UploadState Load(string path, string server)
         {
@@ -538,14 +540,22 @@ public sealed class CollectorUploader : IDisposable
                 if (File.Exists(path))
                 {
                     var s = JsonSerializer.Deserialize<UploadState>(File.ReadAllText(path));
-                    if (s != null && string.Equals(s.Server, server, StringComparison.OrdinalIgnoreCase)) return s;   // another site: start over
+                    if (s != null && string.Equals(s.Server, server, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (s.Version < 2)
+                        {
+                            s.Declined.Clear();                // refused before the website could queue AA ranks: offer them again
+                            s.Version = 2;
+                        }
+                        return s;
+                    }                                                                              // another site: start over
                 }
             }
             catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
             {
                 // an unreadable memory only means some things are sent again
             }
-            return new UploadState { Server = server };
+            return new UploadState { Server = server, Version = 2 };
         }
 
         /// <summary>Adds what another process recorded (this process's own entries win where both have one).</summary>

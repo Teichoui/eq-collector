@@ -33,8 +33,8 @@ capture, about every 20 seconds (longer while the site is unreachable) it sends 
 sending, in case someone else uploaded it meanwhile). If the list cannot be pulled it asks the site about each item
 instead. AA ranks the site already has, with their text, are not sent.
 
-* A moderator/admin token adds new items and AA ranks directly; any other token puts new items in the site's review
-  queue (AA ranks are not stored for those).
+* Everything you upload goes into the website's **review queue** and is added only after a person approves it, whoever's
+  token it is (the website's `review_everything` setting; if it is switched off, a moderator/admin token writes directly).
 * Nothing existing is changed: items the site already has are skipped.
 * What was sent is remembered in `upload-state.json` in the results folder, so nothing is sent twice (to send everything
   again, e.g. after the website was restored from a backup, delete that file). If the website

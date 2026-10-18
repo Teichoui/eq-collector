@@ -127,7 +127,7 @@ public class UploaderTests
                     bool hasBad = json.GetProperty("items").EnumerateArray().Any(i => i.GetProperty("id").GetInt64() == 3);
                     return hasBad
                         ? new HttpResponseMessage((HttpStatusCode)422) { Content = new StringContent("{\"message\":\"bad\"}") }
-                        : FakeSite.Ok($"{{\"items_added\":{json.GetProperty("items").GetArrayLength()},\"items_queued\":0}}");
+                        : FakeSite.Ok($"{{\"items_added\":{json.GetProperty("items").GetArrayLength()},\"items_queued\":0,\"items_skipped\":0}}");
                 },
             };
             using var up = Make(site, dir);
@@ -199,7 +199,7 @@ public class UploaderTests
         var dir = TempDir();
         try
         {
-            var site = new FakeSite { Answer = (_, json) => FakeSite.Ok($"{{\"aa_saved\":{json.GetProperty("aa").GetArrayLength()}}}") };
+            var site = new FakeSite { Answer = (_, json) => FakeSite.Ok($"{{\"aa_saved\":{json.GetProperty("aa").GetArrayLength()},\"aa_skipped\":0}}") };
             using var up = Make(site, dir);
 
             var first = await up.UploadAsync(new List<IReadOnlyDictionary<string, object?>>(), new[] { Aa(1, null), Aa(2) });
@@ -227,7 +227,7 @@ public class UploaderTests
             {
                 Answer = (path, json) => path == "/api/collector/check"
                     ? FakeSite.Ok("{\"missing_items\":[10,11]}")
-                    : FakeSite.Ok("{\"items_added\":2,\"aa_saved\":1}"),
+                    : FakeSite.Ok("{\"items_added\":2,\"items_queued\":0,\"items_skipped\":0,\"aa_saved\":1,\"aa_skipped\":0}"),
             };
             using var up = Make(site, dir);
             var r = await up.UploadFolderAsync(dir);
@@ -252,7 +252,7 @@ public class UploaderTests
                 Answer = (path, json) =>
                 {
                     if (down) throw new HttpRequestException("down");
-                    return path == "/api/collector/check" ? FakeSite.Ok("{\"missing_items\":[1]}") : FakeSite.Ok("{\"items_added\":1}");
+                    return path == "/api/collector/check" ? FakeSite.Ok("{\"missing_items\":[1]}") : FakeSite.Ok("{\"items_added\":1,\"items_queued\":0,\"items_skipped\":0}");
                 },
             };
             using var uploader = Make(site, dir);
@@ -344,7 +344,7 @@ public class UploaderTests
             File.WriteAllText(Path.Combine(dir, "items.jsonl"), "{\"id\":42,\"name\":\"Left over\"}\n");
             var site = new FakeSite
             {
-                Answer = (path, _) => path == "/api/collector/check" ? FakeSite.Ok("{\"missing_items\":[42]}") : FakeSite.Ok("{\"items_added\":1}"),
+                Answer = (path, _) => path == "/api/collector/check" ? FakeSite.Ok("{\"missing_items\":[42]}") : FakeSite.Ok("{\"items_added\":1,\"items_queued\":0,\"items_skipped\":0}"),
             };
             using var uploader = Make(site, dir);
             using var auto = new AutoUploader(uploader, () => new UploadBatch(new(), null), null, ct => uploader.UploadFolderAsync(dir, ct)) { Interval = TimeSpan.FromMilliseconds(20) };
@@ -401,7 +401,7 @@ public class UploaderTests
         try
         {
             bool trusted = false;
-            var site = new FakeSite { Answer = (_, json) => FakeSite.Ok(trusted ? $"{{\"aa_saved\":{json.GetProperty("aa").GetArrayLength()}}}" : $"{{\"aa_skipped\":{json.GetProperty("aa").GetArrayLength()}}}") };
+            var site = new FakeSite { Answer = (_, json) => FakeSite.Ok(trusted ? $"{{\"aa_saved\":{json.GetProperty("aa").GetArrayLength()},\"aa_skipped\":0}}" : $"{{\"aa_saved\":0,\"aa_skipped\":{json.GetProperty("aa").GetArrayLength()}}}") };
             var ranks = new[] { Aa(1), Aa(2) };
             using (var plain = new CollectorUploader("https://example.test", "plain-token", dir, handler: site))
             {
@@ -426,7 +426,7 @@ public class UploaderTests
         {
             File.WriteAllText(Path.Combine(dir, "aa.jsonl"), "{\"rank_id\":1,\"aa_id\":1,\"rank\":1,\"title\":\"old\"}\n");
             File.WriteAllText(Path.Combine(dir, "aa.partial.jsonl"), "{\"rank_id\":1,\"aa_id\":1,\"rank\":1,\"title\":\"new\"}\n{\"rank_id\":2,\"aa_id\":1,\"rank\":2,\"title\":\"two\"}\n");
-            var site = new FakeSite { Answer = (_, json) => FakeSite.Ok($"{{\"aa_saved\":{json.GetProperty("aa").GetArrayLength()}}}") };
+            var site = new FakeSite { Answer = (_, json) => FakeSite.Ok($"{{\"aa_saved\":{json.GetProperty("aa").GetArrayLength()},\"aa_skipped\":0}}") };
             using var up = Make(site, dir);
             var r = await up.UploadFolderAsync(dir);
             Assert.Equal(2, r.AaSent);                                    // one record per rank, the partial file's version
@@ -536,7 +536,7 @@ public class UploaderTests
             var site = new FakeSite
             {
                 Answer = (path, _) => path == "/api/collector/check" ? FakeSite.Ok("{\"missing_items\":[5]}")
-                    : reject ? new HttpResponseMessage((HttpStatusCode)422) { Content = new StringContent("{}") } : FakeSite.Ok("{\"items_added\":1}"),
+                    : reject ? new HttpResponseMessage((HttpStatusCode)422) { Content = new StringContent("{}") } : FakeSite.Ok("{\"items_added\":1,\"items_queued\":0,\"items_skipped\":0}"),
             };
             using var up = Make(site, dir);
             Assert.Equal(1, (await up.UploadAsync(new[] { Item(5, "Broken") }, NoAa)).Rejected);
@@ -557,7 +557,7 @@ public class UploaderTests
         var dir = TempDir();
         try
         {
-            var site = new FakeSite { Answer = (path, _) => path == "/api/collector/check" ? FakeSite.Ok("{\"missing_items\":[]}") : FakeSite.Ok("{\"items_added\":0}") };
+            var site = new FakeSite { Answer = (path, _) => path == "/api/collector/check" ? FakeSite.Ok("{\"missing_items\":[]}") : FakeSite.Ok("{\"items_added\":0,\"items_queued\":0,\"items_skipped\":0}") };
             using var up = Make(site, dir);
             await up.UploadAsync(new[] { Item(1) }, NoAa);                    // creates the state file with item 1
 
@@ -689,6 +689,41 @@ public class UploaderTests
             Assert.Equal(1, (await up.UploadAsync(new[] { Item(1) }, NoAa)).ItemsChecked);     // and it works once the other process is done
         }
         finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task AA_ranks_queued_for_review_count_as_sent_and_are_not_sent_again()
+    {
+        var dir = TempDir();
+        try
+        {
+            var site = new FakeSite { Answer = (_, json) => FakeSite.Ok($"{{\"aa_saved\":0,\"aa_skipped\":0,\"aa_queued\":{json.GetProperty("aa").GetArrayLength()}}}") };
+            using var up = Make(site, dir);
+            var r = await up.UploadAsync(new List<IReadOnlyDictionary<string, object?>>(), new[] { Aa(1), Aa(2) });
+            Assert.Equal(2, r.AaQueued);
+            Assert.Equal(0, r.AaSaved);
+            Assert.Equal(0, (await up.UploadAsync(new List<IReadOnlyDictionary<string, object?>>(), new[] { Aa(1), Aa(2) })).AaSent);
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task A_half_answer_with_only_some_counters_is_not_an_acknowledgement()
+    {
+        var dir = TempDir();
+        try
+        {
+            var aaOnly = new FakeSite { Answer = (_, _) => FakeSite.Ok("{\"aa_queued\":0}") };
+            using var up = Make(aaOnly, dir);
+            await Assert.ThrowsAsync<UploadUnavailableException>(() => up.UploadAsync(new List<IReadOnlyDictionary<string, object?>>(), new[] { Aa(1) }));
+            Assert.Equal(0, up.KnownAa);
+
+            var itemsHalf = new FakeSite { Answer = (path, _) => path == "/api/collector/check" ? FakeSite.Ok("{\"missing_items\":[1]}") : FakeSite.Ok("{\"items_added\":1}") };
+            using var up2 = Make(itemsHalf, TempDir());
+            await Assert.ThrowsAsync<UploadUnavailableException>(() => up2.UploadAsync(new[] { Item(1) }, NoAa));
+            Assert.Equal(0, up2.KnownItems);
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
     }
 
     private static async Task WaitFor(Func<bool> condition, int seconds = 5)
