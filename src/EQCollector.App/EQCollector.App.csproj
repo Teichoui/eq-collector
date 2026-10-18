@@ -10,6 +10,7 @@
     <RootNamespace>EQCollector.App</RootNamespace>
     <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
     <Version>0.4.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <ApplicationIcon>eqcollector.ico</ApplicationIcon>
     <Product>EQ Collector</Product>
     <Company>Norrath Codex</Company>
