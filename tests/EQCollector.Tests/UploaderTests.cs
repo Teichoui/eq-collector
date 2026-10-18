@@ -285,7 +285,7 @@ public class UploaderTests
             auto.Start();
             await WaitFor(() => !auto.Active);
             await Task.Delay(150);
-            Assert.Single(messages.Where(m => m.StartsWith("Upload stopped")));
+            Assert.Single(messages, m => m.StartsWith("Upload stopped"));
             Assert.Single(site.Requests);                               // it did not keep knocking
             await auto.StopAsync(TimeSpan.FromSeconds(1));
         }
