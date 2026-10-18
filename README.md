@@ -95,13 +95,14 @@ The code here is our own rewrite. Also credited on the site's Credits page.
 ## Code signing policy
 
 Releases are built from this repository by GitHub Actions (`.github/workflows/build.yml`) and are meant to be signed with a
-free certificate from the [SignPath Foundation](https://signpath.org). Status: **the SignPath application is pending, so
+free code-signing certificate issued to the [SignPath Foundation](https://signpath.org). Status: **the SignPath application is pending, so
 releases up to 0.4.0 are not signed yet.** Once a release is signed, this line will say so.
 
-Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+Free code signing provided by [SignPath.io](https://signpath.io), certificate issued to [SignPath Foundation](https://signpath.org).
 
-* **Only code from this repository is signed**, built by the automated workflow from a tagged commit -- never a build from
-  someone's own computer.
+* **Only builds made by this repository's automated workflow are submitted for signing**, from a tagged commit that is on
+  `main` -- never a build from someone's own computer, and never anyone else's binaries. (The signed program contains the
+  .NET runtime and the libraries the project uses, as any self-contained program does.)
 * **Team roles:** Authors, committers and reviewers: [Teichoui](https://github.com/Teichoui). Approvers (each signing request
   is approved by hand): [Teichoui](https://github.com/Teichoui). Everyone with signing or repository access uses
   multi-factor authentication.

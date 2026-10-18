@@ -2,10 +2,11 @@
 <!-- SignPath artifact configuration for the "EQCollector-unsigned" GitHub artifact: a zip holding the single-file exe. -->
 <artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
   <parameters>
-    <parameter name="version" default-value="0.0.0" />
+    <parameter name="productVersion" required="true" />
+    <parameter name="fileVersion" required="true" />
   </parameters>
   <zip-file>
-    <pe-file path="EQCollector.exe" product-name="EQ Collector" product-version="${version}">
+    <pe-file path="EQCollector.exe" product-name="EQ Collector" product-version="${productVersion}" file-version="${fileVersion}">
       <authenticode-sign />
     </pe-file>
   </zip-file>
