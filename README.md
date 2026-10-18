@@ -89,8 +89,8 @@ users need nothing installed.
 ## Credit
 
 The record layouts for items and AAs, the session-layer details and the list of well-known AAs used to find the AA
-packet type come from **kauffman12's [eqaainfo](https://github.com/kauffman12/eqaainfo)**, used with the author's
-permission and credited as they asked. The code here is our own rewrite. Also credited on the site's Credits page.
+packet type come from **kauffman12's [eqaainfo](https://github.com/kauffman12/eqaainfo)**, 
+The code here is our own rewrite. Also credited on the site's Credits page.
 
 ## What has been checked
 
