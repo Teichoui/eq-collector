@@ -10,7 +10,7 @@ It can also share what it finds with [Norrath Codex](https://norrathcodex.com): 
 site already has and uploads only what is new, into the site's review queue. Off by default -- see
 [Website upload](#website-upload).
 
-* **Version 0.4.0** -- built for .NET 10; the published `EQCollector.exe` is one self-contained file (about 52 MB).
+* **Version 0.4.1** -- built for .NET 10; the published `EQCollector.exe` is one self-contained file (about 52 MB).
 * Tested on real EverQuest traffic, live and from saved captures (see [What has been checked](#what-has-been-checked)).
 
 ## Run it

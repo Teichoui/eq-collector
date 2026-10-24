@@ -44,6 +44,11 @@ public sealed class CollectorEngine : IDisposable
     public long AppPackets { get; private set; }
     public int Sessions => _reader.SessionsSeen;
     public int ItemCount => _items.Count;
+
+    /// <summary>Times an item record was found but dropped because its values are impossible (see <see cref="ItemSanity"/>);
+    /// the same garbled record seen again counts again.</summary>
+    public int GarbledItems => _garbledItems;
+    private int _garbledItems;
     public int AaCount => _aa.Count;
     public ushort? AaOpcode => _aa.Opcode;
     public bool AaBit64 => _aa.Bit64;
@@ -213,6 +218,12 @@ public sealed class CollectorEngine : IDisposable
                 if (_items.Count >= MaxItems)
                 {
                     if (!_itemCapReported) { _itemCapReported = true; Report($"More than {MaxItems:N0} different items: no more are kept this run (a real capture holds a few thousand)."); }
+                    continue;
+                }
+                if (ItemSanity.Problem(found.Item) is { } why)
+                {
+                    // The scan lined up on the wrong bytes: the record is noise, so it is neither kept nor uploaded.
+                    if (++_garbledItems <= 3) Report($"Skipped a garbled item record ({why}).");
                     continue;
                 }
                 if (!_items.TryAdd(found.Item.Id, found.Item)) continue;
