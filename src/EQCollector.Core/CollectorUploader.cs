@@ -198,6 +198,7 @@ public sealed class CollectorUploader : IDisposable
         foreach (var item in items)
         {
             if (!TryId(item, "id", out long id) || _state.Items.Contains(id)) continue;
+            if (ItemSanity.Problem(item) != null) continue;      // a garbled record from an older run's items.jsonl: never sent
             if (manifest != null && manifest.HasItem(id))
             {
                 onSite++;                                  // the pulled list says the site has it: nothing to ask or send. Not
