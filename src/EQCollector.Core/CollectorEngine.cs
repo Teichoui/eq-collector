@@ -45,7 +45,8 @@ public sealed class CollectorEngine : IDisposable
     public int Sessions => _reader.SessionsSeen;
     public int ItemCount => _items.Count;
 
-    /// <summary>Item records found but dropped because their values are impossible (see <see cref="ItemSanity"/>).</summary>
+    /// <summary>Times an item record was found but dropped because its values are impossible (see <see cref="ItemSanity"/>);
+    /// the same garbled record seen again counts again.</summary>
     public int GarbledItems => _garbledItems;
     private int _garbledItems;
     public int AaCount => _aa.Count;

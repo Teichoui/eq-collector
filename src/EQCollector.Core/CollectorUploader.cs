@@ -19,7 +19,7 @@ public sealed class UploadUnavailableException : Exception
 }
 
 /// <summary>What one upload round did.</summary>
-public sealed record UploadSummary(int ItemsChecked, int ItemsSent, int ItemsAdded, int ItemsQueued, int AaSent, int AaSaved, int Rejected, int ItemsAlreadyOnSite = 0, int AaQueued = 0);
+public sealed record UploadSummary(int ItemsChecked, int ItemsSent, int ItemsAdded, int ItemsQueued, int AaSent, int AaSaved, int Rejected, int ItemsAlreadyOnSite = 0, int AaQueued = 0, int ItemsGarbled = 0);
 
 /// <summary>What the server said about the token.</summary>
 public sealed record PingResult(bool Ok, bool Trusted, string Site);
@@ -44,6 +44,7 @@ public sealed class CollectorUploader : IDisposable
     private readonly HttpClient _http;
     private readonly string _statePath;
     private readonly Action<string>? _log;
+    private int _garbledLogged;                        // the last count of garbled records reported, so it is not repeated every round
     private readonly string _server;
     private readonly string _tokenId;                  // which token this is (not the token): declined AA ranks are per token
     private readonly UploadState _state;
@@ -190,7 +191,7 @@ public sealed class CollectorUploader : IDisposable
     private async Task<UploadSummary> UploadCoreAsync(IReadOnlyCollection<IReadOnlyDictionary<string, object?>> items,
         IReadOnlyCollection<IReadOnlyDictionary<string, object?>> aa, CancellationToken ct)
     {
-        int checkedCount = 0, sent = 0, added = 0, queued = 0, aaSent = 0, aaSaved = 0, aaQueued = 0, rejected = 0, onSite = 0;
+        int checkedCount = 0, sent = 0, added = 0, queued = 0, aaSent = 0, aaSaved = 0, aaQueued = 0, rejected = 0, onSite = 0, garbled = 0;
         var manifest = Manifest;
 
         // ---- items: ask which ids the site lacks, send only those --------------------------------------------------
@@ -198,7 +199,7 @@ public sealed class CollectorUploader : IDisposable
         foreach (var item in items)
         {
             if (!TryId(item, "id", out long id) || _state.Items.Contains(id)) continue;
-            if (ItemSanity.Problem(item) != null) continue;      // a garbled record from an older run's items.jsonl: never sent
+            if (ItemSanity.Problem(item) != null) { garbled++; continue; }      // a garbled record from an older run's items.jsonl: never sent
             if (manifest != null && manifest.HasItem(id))
             {
                 onSite++;                                  // the pulled list says the site has it: nothing to ask or send. Not
@@ -275,7 +276,12 @@ public sealed class CollectorUploader : IDisposable
         }
 
         _state.Save(_statePath);
-        var summary = new UploadSummary(checkedCount, sent, added, queued, aaSent, aaSaved, rejected, onSite, aaQueued);
+        if (garbled > 0 && garbled != _garbledLogged)
+        {
+            _garbledLogged = garbled;       // said once per change, not on every 20-second round
+            _log?.Invoke($"{garbled} item record(s) look garbled (impossible values, a mis-decoded packet) and are not uploaded.");
+        }
+        var summary = new UploadSummary(checkedCount, sent, added, queued, aaSent, aaSaved, rejected, onSite, aaQueued, garbled);
         if (sent > 0 || aaSent > 0) _log?.Invoke($"Uploaded: {added} new items added, {queued} items and {aaQueued} AA ranks queued for review, {aaSaved} AA ranks saved.");
         return summary;
     }
@@ -391,7 +397,25 @@ public sealed class CollectorUploader : IDisposable
 
         var doc = await ReadJson(response, ct);
         RequireCounters(doc, "items_added", "items_queued", "items_skipped");
-        return new ItemResult(batch.Count, Int(doc, "items_added"), Int(doc, "items_queued"), 0);
+
+        // Items the website refused as not real items (impossible values; newer websites name them). They are remembered by
+        // their data, like a 422: not sent again unless the record changes -- and not marked as handled, so a corrected one goes.
+        int refused = 0;
+        if (doc.ValueKind == JsonValueKind.Object && doc.TryGetProperty("rejected_item_ids", out var ids) && ids.ValueKind == JsonValueKind.Array)
+        {
+            var byId = new Dictionary<long, IReadOnlyDictionary<string, object?>>();
+            foreach (var record in batch) if (TryId(record, "id", out long recordId)) byId[recordId] = record;
+            foreach (var e in ids.EnumerateArray())
+            {
+                if (e.ValueKind == JsonValueKind.Number && e.TryGetInt64(out long rid) && byId.TryGetValue(rid, out var rejectedRecord))
+                {
+                    _state.RejectedHashes[rid] = Hash(rejectedRecord);
+                    refused++;
+                }
+            }
+            if (refused > 0) _log?.Invoke($"The website refused {refused} item(s) as not real items; they will not be sent again unless their data changes.");
+        }
+        return new ItemResult(batch.Count, Int(doc, "items_added"), Int(doc, "items_queued"), refused);
     }
 
     private static HttpRequestMessage JsonRequest(string path, object body)

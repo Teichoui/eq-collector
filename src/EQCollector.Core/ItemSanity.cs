@@ -20,9 +20,16 @@ public static class ItemSanity
     private static readonly string[] YesNoFlags = { "nodestroy", "noground", "nonpc" };
 
     /// <summary>Null when the record looks like a real item, otherwise a short reason it does not.</summary>
-    public static string? Problem(ItemRecord item) => Check(c => item[c], ItemDecoder.Columns);
+    public static string? Problem(ItemRecord item)
+    {
+        if (item.Values.Length != ItemDecoder.Columns.Length) return "wrong number of fields";
+        return Check(c => item[c], ItemDecoder.Columns);
+    }
 
-    /// <summary>The same check for an items.jsonl / upload record (values may be JsonElements).</summary>
+    /// <summary>
+    /// The same check for an items.jsonl / upload record (values may be JsonElements). An abbreviated record is allowed:
+    /// price and the yes/no flags are checked when they are present; the id and the name are always required.
+    /// </summary>
     public static string? Problem(IReadOnlyDictionary<string, object?> record) =>
         Check(c => record.TryGetValue(c, out var v) ? v : null, record.Keys);
 
@@ -34,7 +41,7 @@ public static class ItemSanity
         if (price != null && (!TryLong(price, out long p) || p < 0 || p > int.MaxValue)) return "price out of range";
 
         string? name = AsString(get("name"));
-        if (name != null && (name.Trim().Length == 0 || name.Length > MaxNameLength || name.Trim().All(char.IsDigit)))
+        if (name == null || name.Trim().Length == 0 || name.Length > MaxNameLength || name.Trim().All(char.IsDigit))
             return "item name is not a name";
 
         foreach (string flag in YesNoFlags)
@@ -52,10 +59,11 @@ public static class ItemSanity
         return null;
     }
 
+    /// <summary>Any control character (C0, DEL or C1) except tab, carriage return and line feed.</summary>
     private static bool HasControlCharacter(string s)
     {
         foreach (char c in s)
-            if (c < 0x20 && c != '\t' && c != '\n' && c != '\r' || c == 0x7f) return true;
+            if (char.IsControl(c) && c != '\t' && c != '\n' && c != '\r') return true;
         return false;
     }
 
@@ -66,17 +74,21 @@ public static class ItemSanity
         _ => null,
     };
 
+    /// <summary>Whole numbers only: a float, decimal, bool, char or text is not a valid value for these fields.</summary>
     private static bool TryLong(object? v, out long value)
     {
         value = 0;
         switch (v)
         {
-            case null: return false;
+            case sbyte x: value = x; return true;
+            case byte x: value = x; return true;
+            case short x: value = x; return true;
+            case ushort x: value = x; return true;
+            case int x: value = x; return true;
+            case uint x: value = x; return true;
+            case long x: value = x; return true;
+            case ulong x when x <= long.MaxValue: value = (long)x; return true;
             case JsonElement e: return e.ValueKind == JsonValueKind.Number && e.TryGetInt64(out value);
-            case string: return false;
-            case IConvertible c:
-                try { value = c.ToInt64(null); return true; }
-                catch (Exception ex) when (ex is FormatException or InvalidCastException or OverflowException) { return false; }
             default: return false;
         }
     }
